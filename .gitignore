@@ -1,0 +1,20 @@
+# Ignore files without an extension while keeping directories traversable.
+*
+!*/
+!*.*
+!.gitignore
+
+# Local Codex state.
+.codex
+.codex/
+
+# Common binary artifacts.
+*.a
+*.dll
+*.dylib
+*.exe
+*.lib
+*.o
+*.obj
+*.out
+*.so
