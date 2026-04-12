@@ -89,9 +89,11 @@ const
   SDLK_1* = 0x00000031'u32
   SDLK_2* = 0x00000032'u32
   SDLK_3* = 0x00000033'u32
+  SDLK_4* = 0x00000034'u32
   SCANCODE_1* = 30
   SCANCODE_2* = 31
   SCANCODE_3* = 32
+  SCANCODE_4* = 33
 
 proc setAppMetadata*(
   appName: cstring,
