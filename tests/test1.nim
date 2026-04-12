@@ -49,6 +49,22 @@ suite "SDL3 GPU binding smoke tests":
     check raw(device).isNil
     check raw(texture).isNil
 
+suite "Artist2D primitives":
+  test "circle segment count clamps to supported range":
+    check primitiveCircleSegmentCount(0'f32) == 0
+    check primitiveCircleSegmentCount(1'f32) == 12
+    check primitiveCircleSegmentCount(24'f32) >= primitiveCircleSegmentCount(8'f32)
+    check primitiveCircleSegmentCount(1_000'f32) == 96
+
+  test "primitive helper signatures compile":
+    var artist: Artist2D
+    check compiles(drawFilledRect(artist, [0'f32, 0'f32], [10'f32, 20'f32], [1'f32, 0'f32, 0'f32, 1'f32]))
+    check compiles(drawRect(artist, [0'f32, 0'f32], [10'f32, 20'f32], FColor(r: 1, g: 1, b: 1, a: 1), 2'f32))
+    check compiles(drawLine(artist, [0'f32, 0'f32], [8'f32, 8'f32], [1'f32, 1'f32, 1'f32, 1'f32], 3'f32))
+    check compiles(drawTriangle(artist, [0'f32, 0'f32], [8'f32, 0'f32], [4'f32, 6'f32], [0'f32, 1'f32, 0'f32, 1'f32]))
+    check compiles(drawCircle(artist, [0'f32, 0'f32], 20'f32, FColor(r: 1, g: 0, b: 0, a: 1)))
+    check compiles(drawRing(artist, [0'f32, 0'f32], 20'f32, [0'f32, 0'f32, 1'f32, 1'f32], 4'f32))
+
 suite "SDL3ext ownership":
   test "properties are created and owned":
     let props = SDL3ext.createProperties()

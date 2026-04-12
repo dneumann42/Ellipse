@@ -22,6 +22,8 @@ task test_sdl3_demo, "Run the manual SDL3 callback hello-world demo test":
 task build_gpu_shaders, "Compile Vulkan SPIR-V shaders for the SDL3 GPU demo":
   createDir("src/ellipse/rendering/shaders")
   createDir("tests/assets/gpu")
+  exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/primitives.vert.spv src/ellipse/rendering/shaders/primitives.vert"
+  exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/primitives.frag.spv src/ellipse/rendering/shaders/primitives.frag"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/sprites.vert.spv src/ellipse/rendering/shaders/sprites.vert"
   exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/sprites.frag.spv src/ellipse/rendering/shaders/sprites.frag"
   exec "glslangValidator -V -S vert -o tests/assets/gpu/quad.vert.spv tests/assets/gpu/quad.vert"
@@ -32,6 +34,8 @@ task build_gpu_shaders, "Compile Vulkan SPIR-V shaders for the SDL3 GPU demo":
 task test_sdl3_gpu_demo, "Run the manual SDL3 GPU quad demo":
   createDir("src/ellipse/rendering/shaders")
   createDir("tests/assets/gpu")
+  exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/primitives.vert.spv src/ellipse/rendering/shaders/primitives.vert"
+  exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/primitives.frag.spv src/ellipse/rendering/shaders/primitives.frag"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/sprites.vert.spv src/ellipse/rendering/shaders/sprites.vert"
   exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/sprites.frag.spv src/ellipse/rendering/shaders/sprites.frag"
   exec "glslangValidator -V -S vert -o tests/assets/gpu/quad.vert.spv tests/assets/gpu/quad.vert"
@@ -39,3 +43,11 @@ task test_sdl3_gpu_demo, "Run the manual SDL3 GPU quad demo":
   exec "glslangValidator -V -S vert -o tests/assets/gpu/sprites.vert.spv tests/assets/gpu/sprites.vert"
   exec "glslangValidator -V -S frag -o tests/assets/gpu/sprites.frag.spv tests/assets/gpu/sprites.frag"
   exec "nim c -r tests/t_sdl3_gpu_quad.nim"
+
+task test_sdl3_primitives_demo, "Run the manual SDL3 primitive drawing demo":
+  createDir("src/ellipse/rendering/shaders")
+  exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/primitives.vert.spv src/ellipse/rendering/shaders/primitives.vert"
+  exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/primitives.frag.spv src/ellipse/rendering/shaders/primitives.frag"
+  exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/sprites.vert.spv src/ellipse/rendering/shaders/sprites.vert"
+  exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/sprites.frag.spv src/ellipse/rendering/shaders/sprites.frag"
+  exec "nim c -r tests/t_sdl3_primitives.nim"

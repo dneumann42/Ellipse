@@ -46,21 +46,37 @@ type
     pipeline*: GPUGraphicsPipelineHandle
     vertexShader*: GPUShaderHandle
     fragmentShader*: GPUShaderHandle
+    primitivePipeline*: GPUGraphicsPipelineHandle
+    primitiveVertexShader*: GPUShaderHandle
+    primitiveFragmentShader*: GPUShaderHandle
     quadVertexBuffer*: GPUBufferHandle
     quadIndexBuffer*: GPUBufferHandle
     instanceBuffer*: GPUBufferHandle
     instanceTransferBuffer*: GPUTransferBufferHandle
+    primitiveVertexBuffer*: GPUBufferHandle
+    primitiveIndexBuffer*: GPUBufferHandle
+    primitiveVertexTransferBuffer*: GPUTransferBufferHandle
+    primitiveIndexTransferBuffer*: GPUTransferBufferHandle
     whiteTexture*: GPUTextureHandle
     fontTexture*: GPUTextureHandle
     linearSampler*: GPUSamplerHandle
     nearestSampler*: GPUSamplerHandle
     maxSprites*: int
     maxTextureSlots*: int
+    maxPrimitiveVertices*: int
+    maxPrimitiveIndices*: int
     instances: seq[SpriteInstance]
     batches: seq[SpriteBatch]
+    primitiveVertices: seq[PrimitiveVertex]
+    primitiveIndices: seq[uint32]
+    primitiveBatches: seq[PrimitiveBatch]
+    drawCommands: seq[DrawCommand]
     currentBatchStart: int
     currentBatchCount: int
+    currentPrimitiveStart: int
+    currentPrimitiveCount: int
     currentBindings: seq[TextureBinding]
+    currentDrawMode: DrawMode
     textureFilters: Table[ptr GPUTexture, TextureFilterMode]
 
   QuadVertex = object
@@ -83,6 +99,23 @@ type
     textures: array[8, ptr GPUTexture]
     filterModes: array[8, TextureFilterMode]
 
+  PrimitiveVertex = object
+    position: array[2, cfloat]
+    tint: array[4, cfloat]
+
+  PrimitiveBatch = object
+    firstIndex: uint32
+    indexCount: uint32
+
+  DrawMode = enum
+    drawModeNone,
+    drawModeSprites,
+    drawModePrimitives
+
+  DrawCommand = object
+    mode: DrawMode
+    batchIndex: uint32
+
   TextureBinding = object
     texture: ptr GPUTexture
     filterMode: TextureFilterMode
@@ -101,12 +134,22 @@ const
   fontAtlasRows = 6
   fontAtlasWidth = fontAtlasColumns * fontGlyphWidth
   fontAtlasHeight = fontAtlasRows * fontGlyphHeight
+  minPrimitiveVertexCapacity = 2_048
+  maxPrimitiveVertexCapacity = 65_536
+  primitiveCircleMinSegments = 12
+  primitiveCircleMaxSegments = 96
 
 proc defaultVertexShaderPath*(): string =
   shaderDir / "sprites.vert.spv"
 
 proc defaultFragmentShaderPath*(): string =
   shaderDir / "sprites.frag.spv"
+
+proc defaultPrimitiveVertexShaderPath*(): string =
+  shaderDir / "primitives.vert.spv"
+
+proc defaultPrimitiveFragmentShaderPath*(): string =
+  shaderDir / "primitives.frag.spv"
 
 proc spriteTextureRegion*(u0, v0, u1, v1: cfloat): SpriteTextureRegion =
   SpriteTextureRegion(u0: u0, v0: v0, u1: u1, v1: v1)
@@ -180,6 +223,34 @@ proc quadIndices(): array[6, uint16] =
 
 proc fullRegion(): SpriteTextureRegion =
   spriteTextureRegion(0, 0, 1, 1)
+
+proc defaultPrimitiveVertexCapacity(maxSprites: int): int =
+  let requested =
+    if maxSprites <= 0:
+      minPrimitiveVertexCapacity
+    else:
+      max(minPrimitiveVertexCapacity, maxSprites div 8)
+  clamp(requested, minPrimitiveVertexCapacity, maxPrimitiveVertexCapacity)
+
+proc primitiveColor(color: FColor): array[4, cfloat] =
+  [color.r, color.g, color.b, color.a]
+
+proc triangleArea2(
+  p0, p1, p2: array[2, cfloat]
+): cfloat =
+  (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])
+
+proc hasUsableTriangle(
+  p0, p1, p2: array[2, cfloat]
+): bool =
+  abs(triangleArea2(p0, p1, p2)) > 0.0001'f32
+
+proc primitiveCircleSegmentCount*(radius: cfloat): int =
+  if radius <= 0:
+    return 0
+
+  let estimated = int(ceil(2'f32 * PI.cfloat * radius / 10'f32))
+  clamp(estimated, primitiveCircleMinSegments, primitiveCircleMaxSegments)
 
 proc glyphRows(ch: char): array[7, uint8] =
   case ch.toUpperAscii
@@ -319,9 +390,28 @@ proc finalizeBatch(artist: var Artist2D) =
       batch.textures[i] = raw(artist.whiteTexture)
       batch.filterModes[i] = tfLinear
   artist.batches.add(batch)
+  artist.drawCommands.add(DrawCommand(
+    mode: drawModeSprites,
+    batchIndex: uint32(artist.batches.len - 1)
+  ))
   artist.currentBatchStart = artist.instances.len
   artist.currentBatchCount = 0
   artist.currentBindings.setLen(0)
+
+proc finalizePrimitiveBatch(artist: var Artist2D) =
+  if artist.currentPrimitiveCount <= 0:
+    return
+
+  artist.primitiveBatches.add(PrimitiveBatch(
+    firstIndex: uint32(artist.currentPrimitiveStart),
+    indexCount: uint32(artist.currentPrimitiveCount)
+  ))
+  artist.drawCommands.add(DrawCommand(
+    mode: drawModePrimitives,
+    batchIndex: uint32(artist.primitiveBatches.len - 1)
+  ))
+  artist.currentPrimitiveStart = artist.primitiveIndices.len
+  artist.currentPrimitiveCount = 0
 
 proc textureFilter(artist: Artist2D; texture: ptr GPUTexture): TextureFilterMode =
   if texture.isNil:
@@ -482,6 +572,39 @@ proc createPipeline(artist: var Artist2D; swapchainFormat: GPUTextureFormat) =
     uint32(vertexAttributes.len)
   )
 
+proc createPrimitivePipeline(artist: var Artist2D; swapchainFormat: GPUTextureFormat) =
+  var vertexBufferDescription = GPUVertexBufferDescription(
+    slot: 0,
+    pitch: uint32(sizeof(PrimitiveVertex)),
+    input_rate: gpuVertexInputRateVertex,
+    instance_step_rate: 0
+  )
+  var vertexAttributes = [
+    GPUVertexAttribute(
+      location: 0,
+      buffer_slot: 0,
+      format: gpuVertexElementFormatFloat2,
+      offset: uint32(offsetof(PrimitiveVertex, position))
+    ),
+    GPUVertexAttribute(
+      location: 1,
+      buffer_slot: 0,
+      format: gpuVertexElementFormatFloat4,
+      offset: uint32(offsetof(PrimitiveVertex, tint))
+    )
+  ]
+
+  artist.primitivePipeline = createAlphaBlendedColorPipeline(
+    artist.device,
+    swapchainFormat,
+    artist.primitiveVertexShader,
+    artist.primitiveFragmentShader,
+    addr vertexBufferDescription,
+    1,
+    addr vertexAttributes[0],
+    uint32(vertexAttributes.len)
+  )
+
 proc initArtist2D*(
   device: GPUDeviceHandle,
   swapchainFormat: GPUTextureFormat,
@@ -497,8 +620,14 @@ proc initArtist2D*(
     1,
     maxShaderTextureSlots
   )
+  result.maxPrimitiveVertices = defaultPrimitiveVertexCapacity(result.maxSprites)
+  result.maxPrimitiveIndices = result.maxPrimitiveVertices * 3
   result.instances = newSeqOfCap[SpriteInstance](result.maxSprites)
   result.batches = newSeqOfCap[SpriteBatch](max(1, result.maxSprites div 256))
+  result.primitiveVertices = newSeqOfCap[PrimitiveVertex](result.maxPrimitiveVertices)
+  result.primitiveIndices = newSeqOfCap[uint32](result.maxPrimitiveIndices)
+  result.primitiveBatches = newSeqOfCap[PrimitiveBatch](max(1, result.maxPrimitiveVertices div 256))
+  result.drawCommands = newSeqOfCap[DrawCommand](max(1, result.maxSprites div 128))
   result.currentBindings = newSeqOfCap[TextureBinding](result.maxTextureSlots)
   result.textureFilters = initTable[ptr GPUTexture, TextureFilterMode]()
 
@@ -514,6 +643,20 @@ proc initArtist2D*(
     if config.fragmentShaderPath.len > 0: config.fragmentShaderPath else: defaultFragmentShaderPath(),
     gpuShaderStageFragment,
     uint32(maxShaderTextureSlots),
+    0
+  )
+  result.primitiveVertexShader = createShaderFromFile(
+    device,
+    defaultPrimitiveVertexShaderPath(),
+    gpuShaderStageVertex,
+    0,
+    1
+  )
+  result.primitiveFragmentShader = createShaderFromFile(
+    device,
+    defaultPrimitiveFragmentShaderPath(),
+    gpuShaderStageFragment,
+    0,
     0
   )
 
@@ -545,6 +688,34 @@ proc initArtist2D*(
   )
   result.instanceTransferBuffer = createGPUTransferBuffer(device, transferInfo)
 
+  let primitiveVertexBufferInfo = GPUBufferCreateInfo(
+    usage: GPU_BUFFERUSAGE_VERTEX,
+    size: uint32(result.maxPrimitiveVertices * sizeof(PrimitiveVertex)),
+    props: 0
+  )
+  result.primitiveVertexBuffer = createGPUBuffer(device, primitiveVertexBufferInfo)
+
+  let primitiveIndexBufferInfo = GPUBufferCreateInfo(
+    usage: GPU_BUFFERUSAGE_INDEX,
+    size: uint32(result.maxPrimitiveIndices * sizeof(uint32)),
+    props: 0
+  )
+  result.primitiveIndexBuffer = createGPUBuffer(device, primitiveIndexBufferInfo)
+
+  let primitiveVertexTransferInfo = GPUTransferBufferCreateInfo(
+    usage: gpuTransferBufferUsageUpload,
+    size: uint32(result.maxPrimitiveVertices * sizeof(PrimitiveVertex)),
+    props: 0
+  )
+  result.primitiveVertexTransferBuffer = createGPUTransferBuffer(device, primitiveVertexTransferInfo)
+
+  let primitiveIndexTransferInfo = GPUTransferBufferCreateInfo(
+    usage: gpuTransferBufferUsageUpload,
+    size: uint32(result.maxPrimitiveIndices * sizeof(uint32)),
+    props: 0
+  )
+  result.primitiveIndexTransferBuffer = createGPUTransferBuffer(device, primitiveIndexTransferInfo)
+
   result.whiteTexture = createWhiteTexture(device)
   result.fontTexture = createFontTexture(device)
   let samplerInfo =
@@ -573,15 +744,27 @@ proc initArtist2D*(
   )
 
   result.createPipeline(swapchainFormat)
+  result.createPrimitivePipeline(swapchainFormat)
 
 proc beginFrame*(artist: var Artist2D) =
   artist.instances.setLen(0)
   artist.batches.setLen(0)
+  artist.primitiveVertices.setLen(0)
+  artist.primitiveIndices.setLen(0)
+  artist.primitiveBatches.setLen(0)
+  artist.drawCommands.setLen(0)
   artist.currentBindings.setLen(0)
   artist.currentBatchStart = 0
   artist.currentBatchCount = 0
+  artist.currentPrimitiveStart = 0
+  artist.currentPrimitiveCount = 0
+  artist.currentDrawMode = drawModeNone
 
 proc drawSprite*(artist: var Artist2D; sprite: Sprite2D): bool =
+  if artist.currentDrawMode == drawModePrimitives:
+    artist.finalizePrimitiveBatch()
+  artist.currentDrawMode = drawModeSprites
+
   if artist.instances.len >= artist.maxSprites:
     return false
 
@@ -605,6 +788,292 @@ proc drawSprite*(artist: var Artist2D; sprite: Sprite2D): bool =
   ))
   inc artist.currentBatchCount
   true
+
+proc canAddPrimitive(
+  artist: Artist2D;
+  verticesNeeded: int;
+  indicesNeeded: int
+): bool =
+  artist.primitiveVertices.len + verticesNeeded <= artist.maxPrimitiveVertices and
+    artist.primitiveIndices.len + indicesNeeded <= artist.maxPrimitiveIndices
+
+proc beginPrimitiveGeometry(artist: var Artist2D) =
+  if artist.currentDrawMode == drawModeSprites:
+    artist.finalizeBatch()
+  if artist.currentDrawMode != drawModePrimitives:
+    artist.currentDrawMode = drawModePrimitives
+    artist.currentPrimitiveStart = artist.primitiveIndices.len
+
+proc addPrimitiveVertex(
+  artist: var Artist2D;
+  position: array[2, cfloat];
+  tint: array[4, cfloat]
+): uint32 =
+  result = uint32(artist.primitiveVertices.len)
+  artist.primitiveVertices.add(PrimitiveVertex(position: position, tint: tint))
+
+proc addPrimitiveTriangleIndices(
+  artist: var Artist2D;
+  i0, i1, i2: uint32
+) =
+  artist.primitiveIndices.add(i0)
+  artist.primitiveIndices.add(i1)
+  artist.primitiveIndices.add(i2)
+  artist.currentPrimitiveCount += 3
+
+proc addColoredTriangle(
+  artist: var Artist2D;
+  p0, p1, p2: array[2, cfloat];
+  tint: array[4, cfloat]
+): bool =
+  if not hasUsableTriangle(p0, p1, p2):
+    return true
+  if not artist.canAddPrimitive(3, 3):
+    return false
+
+  artist.beginPrimitiveGeometry()
+  let base = artist.addPrimitiveVertex(p0, tint)
+  discard artist.addPrimitiveVertex(p1, tint)
+  discard artist.addPrimitiveVertex(p2, tint)
+  artist.addPrimitiveTriangleIndices(base, base + 1, base + 2)
+  true
+
+proc addColoredQuad(
+  artist: var Artist2D;
+  p0, p1, p2, p3: array[2, cfloat];
+  tint: array[4, cfloat]
+): bool =
+  if not artist.canAddPrimitive(4, 6):
+    return false
+
+  artist.beginPrimitiveGeometry()
+  let base = artist.addPrimitiveVertex(p0, tint)
+  discard artist.addPrimitiveVertex(p1, tint)
+  discard artist.addPrimitiveVertex(p2, tint)
+  discard artist.addPrimitiveVertex(p3, tint)
+  artist.addPrimitiveTriangleIndices(base, base + 1, base + 2)
+  artist.addPrimitiveTriangleIndices(base, base + 2, base + 3)
+  true
+
+proc drawFilledRect*(
+  artist: var Artist2D;
+  position: array[2, cfloat];
+  size: array[2, cfloat];
+  tint: array[4, cfloat]
+): bool =
+  let width = abs(size[0])
+  let height = abs(size[1])
+  if width <= 0 or height <= 0:
+    return true
+
+  let left = min(position[0], position[0] + size[0])
+  let top = min(position[1], position[1] + size[1])
+  let right = left + width
+  let bottom = top + height
+  artist.addColoredQuad(
+    [left, top],
+    [right, top],
+    [right, bottom],
+    [left, bottom],
+    tint
+  )
+
+proc drawFilledRect*(
+  artist: var Artist2D;
+  position: array[2, cfloat];
+  size: array[2, cfloat];
+  tint: FColor
+): bool =
+  artist.drawFilledRect(position, size, primitiveColor(tint))
+
+proc drawLine*(
+  artist: var Artist2D;
+  fromPos: array[2, cfloat];
+  toPos: array[2, cfloat];
+  tint: array[4, cfloat];
+  thickness: cfloat = 1'f32
+): bool =
+  if thickness <= 0:
+    return true
+
+  let dx = toPos[0] - fromPos[0]
+  let dy = toPos[1] - fromPos[1]
+  let length = sqrt(dx * dx + dy * dy)
+  if length <= 0.0001'f32:
+    let half = thickness * 0.5'f32
+    return artist.drawFilledRect(
+      [fromPos[0] - half, fromPos[1] - half],
+      [thickness, thickness],
+      tint
+    )
+
+  let halfThickness = thickness * 0.5'f32
+  let nx = -dy / length * halfThickness
+  let ny = dx / length * halfThickness
+  artist.addColoredQuad(
+    [fromPos[0] - nx, fromPos[1] - ny],
+    [fromPos[0] + nx, fromPos[1] + ny],
+    [toPos[0] + nx, toPos[1] + ny],
+    [toPos[0] - nx, toPos[1] - ny],
+    tint
+  )
+
+proc drawLine*(
+  artist: var Artist2D;
+  fromPos: array[2, cfloat];
+  toPos: array[2, cfloat];
+  tint: FColor;
+  thickness: cfloat = 1'f32
+): bool =
+  artist.drawLine(fromPos, toPos, primitiveColor(tint), thickness)
+
+proc drawRect*(
+  artist: var Artist2D;
+  position: array[2, cfloat];
+  size: array[2, cfloat];
+  tint: array[4, cfloat];
+  thickness: cfloat = 1'f32
+): bool =
+  let width = abs(size[0])
+  let height = abs(size[1])
+  if width <= 0 or height <= 0 or thickness <= 0:
+    return true
+
+  let left = min(position[0], position[0] + size[0])
+  let top = min(position[1], position[1] + size[1])
+  let right = left + width
+  let bottom = top + height
+
+  artist.drawLine([left, top], [right, top], tint, thickness) and
+    artist.drawLine([right, top], [right, bottom], tint, thickness) and
+    artist.drawLine([right, bottom], [left, bottom], tint, thickness) and
+    artist.drawLine([left, bottom], [left, top], tint, thickness)
+
+proc drawRect*(
+  artist: var Artist2D;
+  position: array[2, cfloat];
+  size: array[2, cfloat];
+  tint: FColor;
+  thickness: cfloat = 1'f32
+): bool =
+  artist.drawRect(position, size, primitiveColor(tint), thickness)
+
+proc drawTriangle*(
+  artist: var Artist2D;
+  p0, p1, p2: array[2, cfloat];
+  tint: array[4, cfloat]
+): bool =
+  artist.addColoredTriangle(p0, p1, p2, tint)
+
+proc drawTriangle*(
+  artist: var Artist2D;
+  p0, p1, p2: array[2, cfloat];
+  tint: FColor
+): bool =
+  artist.drawTriangle(p0, p1, p2, primitiveColor(tint))
+
+proc drawCircle*(
+  artist: var Artist2D;
+  center: array[2, cfloat];
+  radius: cfloat;
+  tint: array[4, cfloat]
+): bool =
+  let segments = primitiveCircleSegmentCount(radius)
+  if segments <= 0:
+    return true
+  if not artist.canAddPrimitive(segments + 1, segments * 3):
+    return false
+
+  artist.beginPrimitiveGeometry()
+  let centerIndex = artist.addPrimitiveVertex(center, tint)
+  let angleStep = 2'f32 * PI.cfloat / cfloat(segments)
+  var firstOuterIndex = uint32(0)
+  var previousOuterIndex = uint32(0)
+
+  for i in 0 ..< segments:
+    let angle = cfloat(i) * angleStep
+    let point = [
+      center[0] + cos(angle) * radius,
+      center[1] + sin(angle) * radius
+    ]
+    let outerIndex = artist.addPrimitiveVertex(point, tint)
+    if i == 0:
+      firstOuterIndex = outerIndex
+    else:
+      artist.addPrimitiveTriangleIndices(centerIndex, previousOuterIndex, outerIndex)
+    previousOuterIndex = outerIndex
+
+  artist.addPrimitiveTriangleIndices(centerIndex, previousOuterIndex, firstOuterIndex)
+  true
+
+proc drawCircle*(
+  artist: var Artist2D;
+  center: array[2, cfloat];
+  radius: cfloat;
+  tint: FColor
+): bool =
+  artist.drawCircle(center, radius, primitiveColor(tint))
+
+proc drawRing*(
+  artist: var Artist2D;
+  center: array[2, cfloat];
+  radius: cfloat;
+  tint: array[4, cfloat];
+  thickness: cfloat = 1'f32
+): bool =
+  if radius <= 0 or thickness <= 0:
+    return true
+  if thickness >= radius:
+    return artist.drawCircle(center, radius, tint)
+
+  let segments = primitiveCircleSegmentCount(radius)
+  if segments <= 0:
+    return true
+  if not artist.canAddPrimitive(segments * 2, segments * 6):
+    return false
+
+  artist.beginPrimitiveGeometry()
+  let angleStep = 2'f32 * PI.cfloat / cfloat(segments)
+  let innerRadius = radius - thickness
+  var firstOuterIndex = uint32(0)
+  var firstInnerIndex = uint32(0)
+  var previousOuterIndex = uint32(0)
+  var previousInnerIndex = uint32(0)
+
+  for i in 0 ..< segments:
+    let angle = cfloat(i) * angleStep
+    let unit = [cos(angle), sin(angle)]
+    let outerPoint = [
+      center[0] + unit[0] * radius,
+      center[1] + unit[1] * radius
+    ]
+    let innerPoint = [
+      center[0] + unit[0] * innerRadius,
+      center[1] + unit[1] * innerRadius
+    ]
+    let outerIndex = artist.addPrimitiveVertex(outerPoint, tint)
+    let innerIndex = artist.addPrimitiveVertex(innerPoint, tint)
+    if i == 0:
+      firstOuterIndex = outerIndex
+      firstInnerIndex = innerIndex
+    else:
+      artist.addPrimitiveTriangleIndices(previousOuterIndex, previousInnerIndex, outerIndex)
+      artist.addPrimitiveTriangleIndices(outerIndex, previousInnerIndex, innerIndex)
+    previousOuterIndex = outerIndex
+    previousInnerIndex = innerIndex
+
+  artist.addPrimitiveTriangleIndices(previousOuterIndex, previousInnerIndex, firstOuterIndex)
+  artist.addPrimitiveTriangleIndices(firstOuterIndex, previousInnerIndex, firstInnerIndex)
+  true
+
+proc drawRing*(
+  artist: var Artist2D;
+  center: array[2, cfloat];
+  radius: cfloat;
+  tint: FColor;
+  thickness: cfloat = 1'f32
+): bool =
+  artist.drawRing(center, radius, primitiveColor(tint), thickness)
 
 proc drawText*(
   artist: var Artist2D;
@@ -671,6 +1140,48 @@ proc uploadInstances(artist: var Artist2D; commandBuffer: ptr GPUCommandBuffer) 
   uploadToGPUBuffer(copyPass, addr source, addr destination, true)
   endGPUCopyPass(copyPass)
 
+proc uploadPrimitives(artist: var Artist2D; commandBuffer: ptr GPUCommandBuffer) =
+  if artist.primitiveVertices.len <= 0 or artist.primitiveIndices.len <= 0:
+    return
+
+  let vertexBytes = artist.primitiveVertices.len * sizeof(PrimitiveVertex)
+  let mappedVertices = mapGPUTransferBuffer(artist.device, artist.primitiveVertexTransferBuffer, true)
+  copyMem(mappedVertices, unsafeAddr artist.primitiveVertices[0], vertexBytes)
+  unmapGPUTransferBuffer(artist.device, artist.primitiveVertexTransferBuffer)
+
+  let indexBytes = artist.primitiveIndices.len * sizeof(uint32)
+  let mappedIndices = mapGPUTransferBuffer(artist.device, artist.primitiveIndexTransferBuffer, true)
+  copyMem(mappedIndices, unsafeAddr artist.primitiveIndices[0], indexBytes)
+  unmapGPUTransferBuffer(artist.device, artist.primitiveIndexTransferBuffer)
+
+  let copyPass = beginGPUCopyPass(commandBuffer)
+  if copyPass.isNil:
+    discard cancelGPUCommandBuffer(commandBuffer)
+    raise newException(Artist2DError, "beginGPUCopyPass failed: " & $getError())
+
+  var vertexSource = GPUTransferBufferLocation(
+    transfer_buffer: raw(artist.primitiveVertexTransferBuffer),
+    offset: 0
+  )
+  var vertexDestination = GPUBufferRegion(
+    buffer: raw(artist.primitiveVertexBuffer),
+    offset: 0,
+    size: uint32(vertexBytes)
+  )
+  uploadToGPUBuffer(copyPass, addr vertexSource, addr vertexDestination, true)
+
+  var indexSource = GPUTransferBufferLocation(
+    transfer_buffer: raw(artist.primitiveIndexTransferBuffer),
+    offset: 0
+  )
+  var indexDestination = GPUBufferRegion(
+    buffer: raw(artist.primitiveIndexBuffer),
+    offset: 0,
+    size: uint32(indexBytes)
+  )
+  uploadToGPUBuffer(copyPass, addr indexSource, addr indexDestination, true)
+  endGPUCopyPass(copyPass)
+
 proc render*(
   artist: var Artist2D,
   commandBuffer: ptr GPUCommandBuffer,
@@ -680,8 +1191,15 @@ proc render*(
   clearColor: FColor = FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0),
   loadOp: RenderTargetLoadOp = renderTargetClear
 ) =
-  artist.finalizeBatch()
+  case artist.currentDrawMode
+  of drawModeSprites:
+    artist.finalizeBatch()
+  of drawModePrimitives:
+    artist.finalizePrimitiveBatch()
+  of drawModeNone:
+    discard
   artist.uploadInstances(commandBuffer)
+  artist.uploadPrimitives(commandBuffer)
 
   let projection = orthoProjection(targetWidth, targetHeight)
   pushGPUVertexUniformData(
@@ -719,31 +1237,51 @@ proc render*(
     GPUBufferBinding(buffer: raw(artist.instanceBuffer), offset: 0)
   ]
   var indexBinding = GPUBufferBinding(buffer: raw(artist.quadIndexBuffer), offset: 0)
+  var primitiveVertexBinding = GPUBufferBinding(buffer: raw(artist.primitiveVertexBuffer), offset: 0)
+  var primitiveIndexBinding = GPUBufferBinding(buffer: raw(artist.primitiveIndexBuffer), offset: 0)
 
-  bindGPUGraphicsPipeline(renderPass, raw(artist.pipeline))
-  bindGPUVertexBuffers(renderPass, 0, addr vertexBindings[0], uint32(vertexBindings.len))
-  bindGPUIndexBuffer(renderPass, addr indexBinding, gpuIndexElementSize16Bit)
+  for command in artist.drawCommands:
+    case command.mode
+    of drawModeSprites:
+      let batch = artist.batches[int(command.batchIndex)]
+      bindGPUGraphicsPipeline(renderPass, raw(artist.pipeline))
+      bindGPUVertexBuffers(renderPass, 0, addr vertexBindings[0], uint32(vertexBindings.len))
+      bindGPUIndexBuffer(renderPass, addr indexBinding, gpuIndexElementSize16Bit)
 
-  for batch in artist.batches:
-    var samplers: array[maxShaderTextureSlots, GPUTextureSamplerBinding]
-    for i in 0 ..< maxShaderTextureSlots:
-      samplers[i] = GPUTextureSamplerBinding(
-        texture: batch.textures[i],
-        sampler:
-          if batch.filterModes[i] == tfNearest:
-            raw(artist.nearestSampler)
-          else:
-            raw(artist.linearSampler)
+      var samplers: array[maxShaderTextureSlots, GPUTextureSamplerBinding]
+      for i in 0 ..< maxShaderTextureSlots:
+        samplers[i] = GPUTextureSamplerBinding(
+          texture: batch.textures[i],
+          sampler:
+            if batch.filterModes[i] == tfNearest:
+              raw(artist.nearestSampler)
+            else:
+              raw(artist.linearSampler)
+        )
+      bindGPUFragmentSamplers(renderPass, 0, addr samplers[0], uint32(samplers.len))
+      drawGPUIndexedPrimitives(
+        renderPass,
+        6,
+        batch.instanceCount,
+        0,
+        0,
+        batch.firstInstance
       )
-    bindGPUFragmentSamplers(renderPass, 0, addr samplers[0], uint32(samplers.len))
-    drawGPUIndexedPrimitives(
-      renderPass,
-      6,
-      batch.instanceCount,
-      0,
-      0,
-      batch.firstInstance
-    )
+    of drawModePrimitives:
+      let batch = artist.primitiveBatches[int(command.batchIndex)]
+      bindGPUGraphicsPipeline(renderPass, raw(artist.primitivePipeline))
+      bindGPUVertexBuffers(renderPass, 0, addr primitiveVertexBinding, 1)
+      bindGPUIndexBuffer(renderPass, addr primitiveIndexBinding, gpuIndexElementSize32Bit)
+      drawGPUIndexedPrimitives(
+        renderPass,
+        batch.indexCount,
+        1,
+        batch.firstIndex,
+        0,
+        0
+      )
+    of drawModeNone:
+      discard
 
   endGPURenderPass(renderPass)
 
