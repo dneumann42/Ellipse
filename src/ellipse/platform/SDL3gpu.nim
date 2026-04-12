@@ -98,6 +98,34 @@ type
     gpuCompareOpGreaterOrEqual = 7
     gpuCompareOpAlways = 8
 
+  GPUIndexElementSize* {.size: sizeof(cint), importc: "SDL_GPUIndexElementSize", header: "<SDL3/SDL_gpu.h>".} = enum
+    gpuIndexElementSize16Bit = 0
+    gpuIndexElementSize32Bit = 1
+
+  GPUBlendOp* {.size: sizeof(cint), importc: "SDL_GPUBlendOp", header: "<SDL3/SDL_gpu.h>".} = enum
+    gpuBlendOpInvalid = 0
+    gpuBlendOpAdd = 1
+    gpuBlendOpSubtract = 2
+    gpuBlendOpReverseSubtract = 3
+    gpuBlendOpMin = 4
+    gpuBlendOpMax = 5
+
+  GPUBlendFactor* {.size: sizeof(cint), importc: "SDL_GPUBlendFactor", header: "<SDL3/SDL_gpu.h>".} = enum
+    gpuBlendFactorInvalid = 0
+    gpuBlendFactorZero = 1
+    gpuBlendFactorOne = 2
+    gpuBlendFactorSrcColor = 3
+    gpuBlendFactorOneMinusSrcColor = 4
+    gpuBlendFactorDstColor = 5
+    gpuBlendFactorOneMinusDstColor = 6
+    gpuBlendFactorSrcAlpha = 7
+    gpuBlendFactorOneMinusSrcAlpha = 8
+    gpuBlendFactorDstAlpha = 9
+    gpuBlendFactorOneMinusDstAlpha = 10
+    gpuBlendFactorConstantColor = 11
+    gpuBlendFactorOneMinusConstantColor = 12
+    gpuBlendFactorSrcAlphaSaturate = 13
+
   GPUSampleCount* {.size: sizeof(cint), importc: "SDL_GPUSampleCount", header: "<SDL3/SDL_gpu.h>".} = enum
     gpuSampleCount1 = 0
     gpuSampleCount2 = 1
@@ -477,6 +505,15 @@ proc bindGPUVertexBuffers*(
   header: "<SDL3/SDL_gpu.h>"
 .}
 
+proc bindGPUIndexBuffer*(
+  renderPass: ptr GPURenderPass,
+  binding: ptr GPUBufferBinding,
+  indexElementSize: GPUIndexElementSize
+) {.
+  importc: "SDL_BindGPUIndexBuffer",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
 proc bindGPUFragmentSamplers*(
   renderPass: ptr GPURenderPass,
   firstSlot: uint32,
@@ -498,8 +535,40 @@ proc drawGPUPrimitives*(
   header: "<SDL3/SDL_gpu.h>"
 .}
 
+proc drawGPUIndexedPrimitives*(
+  renderPass: ptr GPURenderPass,
+  numIndices: uint32,
+  numInstances: uint32,
+  firstIndex: uint32,
+  vertexOffset: cint,
+  firstInstance: uint32
+) {.
+  importc: "SDL_DrawGPUIndexedPrimitives",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
 proc endGPURenderPass*(renderPass: ptr GPURenderPass) {.
   importc: "SDL_EndGPURenderPass",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
+proc pushGPUVertexUniformData*(
+  commandBuffer: ptr GPUCommandBuffer,
+  slotIndex: uint32,
+  data: pointer,
+  length: uint32
+) {.
+  importc: "SDL_PushGPUVertexUniformData",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
+proc pushGPUFragmentUniformData*(
+  commandBuffer: ptr GPUCommandBuffer,
+  slotIndex: uint32,
+  data: pointer,
+  length: uint32
+) {.
+  importc: "SDL_PushGPUFragmentUniformData",
   header: "<SDL3/SDL_gpu.h>"
 .}
 

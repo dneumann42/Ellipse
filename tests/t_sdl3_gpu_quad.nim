@@ -1,323 +1,285 @@
-import std/[os]
+import std/math
 
-import ellipse/platform/SDL3
-import ellipse/platform/SDL3gpu
-import ellipse/platform/SDL3gpuext
-import ellipse/rendering/[gpucontext, gpupipelines, gpushaders, gpuuploads]
+import ellipse/platform/application
 
 type
-  DemoError = object of CatchableError
+  SpriteMotion = object
+    basePosition: array[2, cfloat]
+    velocity: array[2, cfloat]
+    size: array[2, cfloat]
+    baseScale: cfloat
+    scaleAmplitude: cfloat
+    scaleSpeed: cfloat
+    rotationOffset: cfloat
+    rotationSpeed: cfloat
+    tint: array[4, cfloat]
+    textureKind: int
+    regionIndex: int
 
-  # This vertex layout belongs to the demo because it matches this sample's
-  # concrete shaders and geometry. Other applications can define their own.
-  Vertex = object
-    position: array[2, cfloat]
-    uv: array[2, cfloat]
-
-  # This state is deliberately sample-specific: one window context plus the
-  # resources needed to draw a single checkerboard-textured quad.
   DemoState = object
-    context: GPUWindowContext
-    vertexBuffer: GPUBufferHandle
-    texture: GPUTextureHandle
-    sampler: GPUSamplerHandle
-    vertexShader: GPUShaderHandle
-    fragmentShader: GPUShaderHandle
-    pipeline: GPUGraphicsPipelineHandle
-    quitRequested: bool
+    atlasTexture: GPUTextureHandle
+    texture1: GPUTextureHandle
+    texture2: GPUTextureHandle
+    texture3: GPUTextureHandle
+    texture4: GPUTextureHandle
+    texture5: GPUTextureHandle
+    texture6: GPUTextureHandle
+    texture7: GPUTextureHandle
+    motions: seq[SpriteMotion]
+    frameIndex: uint64
 
 const
-  windowWidth = 960
-  windowHeight = 540
-  checkerSize = 128
-  shaderDir = currentSourcePath.parentDir / "assets" / "gpu"
+  windowWidth = 1280
+  windowHeight = 720
+  textureSize = 256
+  spriteCount = 50_000
+  pi32 = PI.cfloat
 
-var gDemo: DemoState
+proc wrap(value, extent: cfloat): cfloat =
+  if extent <= 0:
+    return value
+  value - floor(value / extent) * extent
 
-# Asset lookup stays in the demo because the file layout is sample-specific.
-proc shaderPath(name: string): string =
-  shaderDir / name
+proc atlasRegion(index: int): SpriteTextureRegion =
+  let column = cfloat(index mod 2) * 0.5
+  let row = cfloat(index div 2) * 0.5
+  spriteTextureRegion(column, row, column + 0.5, row + 0.5)
 
-# This quad geometry is the concrete mesh for this sample. More general mesh
-# builders can be added later without changing the reusable rendering modules.
-proc quadVertices(): array[6, Vertex] =
-  [
-    Vertex(position: [-0.6'f32, -0.6'f32], uv: [0.0'f32, 1.0'f32]),
-    Vertex(position: [ 0.6'f32, -0.6'f32], uv: [1.0'f32, 1.0'f32]),
-    Vertex(position: [ 0.6'f32,  0.6'f32], uv: [1.0'f32, 0.0'f32]),
-    Vertex(position: [-0.6'f32, -0.6'f32], uv: [0.0'f32, 1.0'f32]),
-    Vertex(position: [ 0.6'f32,  0.6'f32], uv: [1.0'f32, 0.0'f32]),
-    Vertex(position: [-0.6'f32,  0.6'f32], uv: [0.0'f32, 0.0'f32])
-  ]
-
-# The checkerboard is also demo-specific. Another app might load files, render
-# to textures, or generate very different procedural content.
-proc checkerPixels(size: int): seq[uint8] =
+proc makePatternPixels(size: int; variant: int): seq[uint8] =
   result = newSeq[uint8](size * size * 4)
-  let cellSize = max(1, size div 8)
+  let half = size div 2
   for y in 0 ..< size:
     for x in 0 ..< size:
-      let checkerOn = ((x div cellSize) + (y div cellSize)) mod 2 == 0
-      let color =
-        if checkerOn:
-          [uint8(230), uint8(230), uint8(230), uint8(255)]
+      let xf = x.cfloat / max(size - 1, 1).cfloat
+      let yf = y.cfloat / max(size - 1, 1).cfloat
+      var rgba: array[4, uint8]
+      case variant
+      of 0:
+        let topLeft = x < half and y < half
+        let topRight = x >= half and y < half
+        let bottomLeft = x < half and y >= half
+        if topLeft:
+          rgba = [uint8(255 * xf), uint8(70), uint8(120), uint8(255)]
+        elif topRight:
+          rgba = [uint8(40), uint8(255 * yf), uint8(210), uint8(255)]
+        elif bottomLeft:
+          rgba = [uint8(255), uint8(200 * xf), uint8(20), uint8(255)]
         else:
-          [uint8(35), uint8(35), uint8(35), uint8(255)]
+          let checker = (((x div 12) + (y div 12)) and 1) == 0
+          rgba =
+            if checker: [uint8(245), uint8(245), uint8(245), uint8(255)]
+            else: [uint8(25), uint8(25), uint8(25), uint8(255)]
+      of 1:
+        let stripe = sin(xf * 18'f32 + yf * 7'f32)
+        rgba = [
+          uint8(40 + 110 * (xf + 0.2)),
+          uint8(150 + 80 * max(stripe, 0'f32)),
+          uint8(220),
+          uint8(255)
+        ]
+      of 2:
+        let dx = xf - 0.5'f32
+        let dy = yf - 0.5'f32
+        let dist = sqrt(dx * dx + dy * dy)
+        let ring = abs(sin(dist * 42'f32))
+        rgba = [
+          uint8(240 * ring),
+          uint8(40 + 150 * (1'f32 - dist)),
+          uint8(80 + 120 * dist),
+          uint8(255)
+        ]
+      of 3:
+        let wave = abs(sin((xf + yf) * 30'f32))
+        rgba = [
+          uint8(220 * wave),
+          uint8(70 + 140 * xf),
+          uint8(255 * yf),
+          uint8(255)
+        ]
+      of 4:
+        let scan = (((x div 8) xor (y div 8)) and 1).cfloat
+        rgba = [
+          uint8(80 + 90 * scan),
+          uint8(190),
+          uint8(40 + 160 * (1'f32 - scan)),
+          uint8(255)
+        ]
+      of 5:
+        let diag = abs(sin((xf - yf) * 36'f32))
+        rgba = [
+          uint8(250),
+          uint8(80 + 120 * diag),
+          uint8(40 + 180 * xf),
+          uint8(255)
+        ]
+      of 6:
+        let radial = max(0'f32, 1'f32 - sqrt((xf - 0.5'f32)^2 + (yf - 0.5'f32)^2) * 1.7'f32)
+        rgba = [
+          uint8(20 + 220 * yf),
+          uint8(20 + 200 * radial),
+          uint8(220),
+          uint8(255)
+        ]
+      else:
+        let bars = (((x div 16) + variant) mod 3).cfloat
+        rgba = [
+          uint8(70 + 60 * bars),
+          uint8(40 + 170 * xf),
+          uint8(120 + 110 * yf),
+          uint8(255)
+        ]
+
       let offset = (y * size + x) * 4
-      result[offset + 0] = color[0]
-      result[offset + 1] = color[1]
-      result[offset + 2] = color[2]
-      result[offset + 3] = color[3]
+      result[offset + 0] = rgba[0]
+      result[offset + 1] = rgba[1]
+      result[offset + 2] = rgba[2]
+      result[offset + 3] = rgba[3]
 
-# The pipeline helper is generic, but the vertex layout remains here because it
-# is tied to the `Vertex` type and the sample's shader inputs.
-proc createPipeline(state: var DemoState) =
-  var vertexBufferDesc = GPUVertexBufferDescription(
-    slot: 0,
-    pitch: uint32(sizeof(Vertex)),
-    input_rate: gpuVertexInputRateVertex,
-    instance_step_rate: 0
-  )
-  var vertexAttributes = [
-    GPUVertexAttribute(
-      location: 0,
-      buffer_slot: 0,
-      format: gpuVertexElementFormatFloat2,
-      offset: uint32(offsetof(Vertex, position))
-    ),
-    GPUVertexAttribute(
-      location: 1,
-      buffer_slot: 0,
-      format: gpuVertexElementFormatFloat2,
-      offset: uint32(offsetof(Vertex, uv))
+proc buildMotions(count: int): seq[SpriteMotion] =
+  result = newSeq[SpriteMotion](count)
+  for i in 0 ..< count:
+    let column = i mod 600
+    let row = i div 600
+    let phase = cfloat(i mod 2048) * 0.041'f32
+    let hue = cfloat(i mod 360) / 359'f32
+    result[i] = SpriteMotion(
+      basePosition: [
+        cfloat((column * 11) mod (windowWidth + 420) - 160),
+        cfloat((row * 9) mod (windowHeight + 420) - 160)
+      ],
+      velocity: [
+        cos(phase) * (18'f32 + cfloat(i mod 23)),
+        sin(phase * 1.17'f32) * (14'f32 + cfloat(i mod 19))
+      ],
+      size: [
+        8'f32 + cfloat(i mod 21),
+        8'f32 + cfloat((i * 7) mod 19)
+      ],
+      baseScale: 0.55'f32 + cfloat(i mod 5) * 0.18'f32,
+      scaleAmplitude: 0.08'f32 + cfloat(i mod 7) * 0.03'f32,
+      scaleSpeed: 0.75'f32 + cfloat(i mod 11) * 0.09'f32,
+      rotationOffset: phase,
+      rotationSpeed: 0.2'f32 + cfloat(i mod 17) * 0.035'f32,
+      tint: [
+        0.35'f32 + 0.65'f32 * abs(sin(hue * pi32)),
+        0.35'f32 + 0.65'f32 * abs(sin((hue + 0.33'f32) * pi32)),
+        0.35'f32 + 0.65'f32 * abs(sin((hue + 0.66'f32) * pi32)),
+        0.45'f32 + 0.5'f32 * cfloat((i mod 9)) / 8'f32
+      ],
+      textureKind: i mod 9,
+      regionIndex: i mod 4
     )
-  ]
 
-  state.pipeline = createTexturedPipeline(
-    state.context.device,
-    getGPUSwapchainTextureFormat(state.context.claim),
-    state.vertexShader,
-    state.fragmentShader,
-    addr vertexBufferDesc,
-    1,
-    addr vertexAttributes[0],
-    uint32(vertexAttributes.len)
-  )
+proc texturePointer(
+  atlasTexture: GPUTextureHandle;
+  texture1: GPUTextureHandle;
+  texture2: GPUTextureHandle;
+  texture3: GPUTextureHandle;
+  texture4: GPUTextureHandle;
+  texture5: GPUTextureHandle;
+  texture6: GPUTextureHandle;
+  texture7: GPUTextureHandle;
+  kind: int
+): SpriteTexture =
+  case kind
+  of 0: raw(atlasTexture)
+  of 1: raw(texture1)
+  of 2: raw(texture2)
+  of 3: raw(texture3)
+  of 4: raw(texture4)
+  of 5: raw(texture5)
+  of 6: raw(texture6)
+  of 7: raw(texture7)
+  else: nil
 
-proc initializeResources(state: var DemoState) =
-  # The demo chooses which shaders and resources to create; the rendering
-  # modules only supply the generic mechanics.
-  try:
-    state.vertexShader = createShaderFromFile(
-      state.context.device,
-      shaderPath("quad.vert.spv"),
-      gpuShaderStageVertex,
-      0
-    )
-    state.fragmentShader = createShaderFromFile(
-      state.context.device,
-      shaderPath("quad.frag.spv"),
-      gpuShaderStageFragment,
-      1
-    )
-  except ShaderLoadError as err:
-    raise newException(DemoError, err.msg)
+plugin Demo:
+  proc load(
+    artist: Artist2D;
+    atlasTexture: var GPUTextureHandle;
+    texture1: var GPUTextureHandle;
+    texture2: var GPUTextureHandle;
+    texture3: var GPUTextureHandle;
+    texture4: var GPUTextureHandle;
+    texture5: var GPUTextureHandle;
+    texture6: var GPUTextureHandle;
+    texture7: var GPUTextureHandle;
+    motions: var seq[SpriteMotion]
+  ) =
+    atlasTexture = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 0))
+    texture1 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 1))
+    texture2 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 2))
+    texture3 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 3))
+    texture4 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 4))
+    texture5 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 5))
+    texture6 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 6))
+    texture7 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 7))
+    motions = buildMotions(spriteCount)
 
-  let bufferInfo = GPUBufferCreateInfo(
-    usage: GPU_BUFFERUSAGE_VERTEX,
-    size: uint32(sizeof(quadVertices())),
-    props: 0
-  )
-  state.vertexBuffer = createGPUBuffer(state.context.device, bufferInfo)
+  proc draw(
+    artist: var Artist2D;
+    atlasTexture: GPUTextureHandle;
+    texture1: GPUTextureHandle;
+    texture2: GPUTextureHandle;
+    texture3: GPUTextureHandle;
+    texture4: GPUTextureHandle;
+    texture5: GPUTextureHandle;
+    texture6: GPUTextureHandle;
+    texture7: GPUTextureHandle;
+    motions: seq[SpriteMotion];
+    frameIndex: var uint64;
+    swapchainWidth: uint32;
+    swapchainHeight: uint32
+  ) =
+    let time = cfloat(frameIndex) * 0.016'f32
+    inc frameIndex
+    let widthf = max(1'u32, swapchainWidth).cfloat
+    let heightf = max(1'u32, swapchainHeight).cfloat
 
-  let textureInfo = GPUTextureCreateInfo(
-    `type`: gpuTextureType2D,
-    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-    usage: GPU_TEXTUREUSAGE_SAMPLER,
-    width: checkerSize.uint32,
-    height: checkerSize.uint32,
-    layer_count_or_depth: 1,
-    num_levels: 1,
-    sample_count: gpuSampleCount1,
-    props: 0
-  )
-  state.texture = createGPUTexture(state.context.device, textureInfo)
-
-  let samplerInfo = GPUSamplerCreateInfo(
-    min_filter: gpuFilterNearest,
-    mag_filter: gpuFilterNearest,
-    mipmap_mode: gpuSamplerMipmapModeNearest,
-    address_mode_u: gpuSamplerAddressModeRepeat,
-    address_mode_v: gpuSamplerAddressModeRepeat,
-    address_mode_w: gpuSamplerAddressModeRepeat,
-    mip_lod_bias: 0,
-    max_anisotropy: 1,
-    compare_op: gpuCompareOpInvalid,
-    min_lod: 0,
-    max_lod: 0,
-    enable_anisotropy: false,
-    enable_compare: false,
-    props: 0
-  )
-  state.sampler = createGPUSampler(state.context.device, samplerInfo)
-
-  let vertices = quadVertices()
-  try:
-    uploadBufferData(
-      state.context.device,
-      state.vertexBuffer,
-      unsafeAddr vertices[0],
-      sizeof(vertices),
-      "quad vertex upload"
-    )
-  except UploadError as err:
-    raise newException(DemoError, err.msg)
-
-  let pixels = checkerPixels(checkerSize)
-  try:
-    uploadTexture2DData(
-      state.context.device,
-      state.texture,
-      checkerSize,
-      checkerSize,
-      pixels,
-      "checkerboard texture upload"
-    )
-  except UploadError as err:
-    raise newException(DemoError, err.msg)
-
-  createPipeline(state)
-
-proc cleanup(state: var DemoState) =
-  if not raw(state.context.device).isNil:
-    try:
-      waitForGPUIdle(state.context.device)
-    except SDL3gpuext.Error:
-      discard
-  var oldState = move(state)
-  state = default(DemoState)
-  discard oldState
-
-# The SDL callback shell remains in the test because it is application logic,
-# not generic engine code. Another app can reuse the rendering modules with a
-# completely different state model and frame loop.
-proc appInitCallback(appState: ptr pointer; argc: cint; argv: cstringArray): AppResult {.cdecl.} =
-  discard argc
-  discard argv
-  appState[] = addr gDemo
-  gDemo = default(DemoState)
-
-  try:
-    gDemo.context = initGPUWindowContext(
-      GPUWindowConfig(
-        appId: "dev.ellipse.tests.sdl3gpuquad",
-        title: "Ellipse SDL3 GPU Quad",
-        width: windowWidth,
-        height: windowHeight,
-        windowFlags: 0,
-        shaderFormat: GPU_SHADERFORMAT_SPIRV,
-        driverName: "vulkan",
-        debugMode: true
+    for motion in motions:
+      var sprite = initSprite2D()
+      let scalePulse = motion.baseScale + motion.scaleAmplitude * sin(time * motion.scaleSpeed + motion.rotationOffset)
+      sprite.position = [
+        wrap(motion.basePosition[0] + motion.velocity[0] * time, widthf + 240'f32) - 120'f32,
+        wrap(motion.basePosition[1] + motion.velocity[1] * time, heightf + 240'f32) - 120'f32
+      ]
+      sprite.size = motion.size
+      sprite.scale = [scalePulse, scalePulse]
+      sprite.origin = [0.5'f32, 0.5'f32]
+      sprite.rotation = motion.rotationOffset + time * motion.rotationSpeed
+      sprite.tint = motion.tint
+      sprite.texture = texturePointer(
+        atlasTexture,
+        texture1,
+        texture2,
+        texture3,
+        texture4,
+        texture5,
+        texture6,
+        texture7,
+        motion.textureKind
       )
-    )
-    initializeResources(gDemo)
-    return appContinue
-  except CatchableError as err:
-    echo err.msg
-    cleanup(gDemo)
-    return appFailure
+      if motion.textureKind == 0:
+        sprite.region = atlasRegion(motion.regionIndex)
+        sprite.hasRegion = true
 
-proc iterateCallback(appState: pointer): AppResult {.cdecl.} =
-  discard appState
-  if gDemo.quitRequested:
-    return appSuccess
-
-  let commandBuffer =
-    try:
-      acquireGPUCommandBuffer(gDemo.context.device)
-    except SDL3gpuext.Error as err:
-      echo err.msg
-      return appFailure
-
-  var swapchainTexture: ptr GPUTexture
-  var swapchainWidth: uint32
-  var swapchainHeight: uint32
-  if not waitAndAcquireGPUSwapchainTexture(
-    commandBuffer,
-    raw(gDemo.context.window),
-    addr swapchainTexture,
-    addr swapchainWidth,
-    addr swapchainHeight
-  ):
-    echo "waitAndAcquireGPUSwapchainTexture failed: ", getError()
-    discard cancelGPUCommandBuffer(commandBuffer)
-    return appFailure
-
-  if swapchainTexture.isNil:
-    return if submitGPUCommandBuffer(commandBuffer): appContinue else: appFailure
-
-  var colorTarget = GPUColorTargetInfo(
-    texture: swapchainTexture,
-    mip_level: 0,
-    layer_or_depth_plane: 0,
-    clear_color: FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0),
-    load_op: gpuLoadOpClear,
-    store_op: gpuStoreOpStore,
-    resolve_texture: nil,
-    resolve_mip_level: 0,
-    resolve_layer: 0,
-    cycle: false,
-    cycle_resolve_texture: false
-  )
-  let renderPass = beginGPURenderPass(commandBuffer, addr colorTarget, 1, nil)
-  if renderPass.isNil:
-    echo "beginGPURenderPass failed: ", getError()
-    discard cancelGPUCommandBuffer(commandBuffer)
-    return appFailure
-
-  var vertexBinding = GPUBufferBinding(buffer: raw(gDemo.vertexBuffer), offset: 0)
-  var textureBinding = GPUTextureSamplerBinding(texture: raw(gDemo.texture), sampler: raw(gDemo.sampler))
-
-  bindGPUGraphicsPipeline(renderPass, raw(gDemo.pipeline))
-  bindGPUVertexBuffers(renderPass, 0, addr vertexBinding, 1)
-  bindGPUFragmentSamplers(renderPass, 0, addr textureBinding, 1)
-
-  # Extend here for more rendering:
-  # - push per-draw uniforms before the pass to add transforms or tinting
-  # - swap this to indexed draws once you introduce shared meshes
-  # - batch multiple quads by streaming one larger vertex buffer each frame
-  # - split texture/sampler/material state so many draws can reuse one pipeline
-  drawGPUPrimitives(renderPass, 6, 1, 0, 0)
-  endGPURenderPass(renderPass)
-
-  # A camera/projection path can keep this exact render loop and only change
-  # the shader interface plus the data pushed to uniform slots.
-  if not submitGPUCommandBuffer(commandBuffer):
-    echo "submitGPUCommandBuffer failed: ", getError()
-    return appFailure
-
-  appContinue
-
-proc eventCallback(appState: pointer; event: ptr Event): AppResult {.cdecl.} =
-  discard appState
-  case event[].`type`
-  of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED:
-    gDemo.quitRequested = true
-    appSuccess
-  else:
-    appContinue
-
-proc quitCallback(appState: pointer; result: AppResult) {.cdecl.} =
-  discard appState
-  discard result
-  cleanup(gDemo)
+      if not drawSprite(artist, sprite):
+        break
 
 when isMainModule:
-  discard enterAppMainCallbacks(
-    0,
-    nil,
-    appInitCallback,
-    iterateCallback,
-    eventCallback,
-    quitCallback
+  startApplication(
+    AppConfig(
+      appId: "dev.ellipse.tests.sdl3gpuartist2d",
+      title: "Ellipse SDL3 GPU Artist2D",
+      width: windowWidth,
+      height: windowHeight,
+      windowFlags: 0,
+      resizable: true,
+      shaderFormat: GPU_SHADERFORMAT_SPIRV,
+      driverName: "vulkan",
+      debugMode: true,
+      maxSprites: spriteCount,
+      maxTextureSlots: 8,
+      clearColor: FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0)
+    ),
+    DemoState()
   )

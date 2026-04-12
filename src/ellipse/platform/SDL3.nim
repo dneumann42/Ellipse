@@ -53,6 +53,8 @@ const
   INIT_VIDEO* = 0x00000020'u32
   INIT_AUDIO* = 0x00000010'u32
 
+  WINDOW_RESIZABLE* = 0x0000000000000020'u64
+
   EVENT_QUIT* = 0x00000100'u32
   EVENT_WINDOW_CLOSE_REQUESTED* = 0x00000210'u32
 
@@ -245,6 +247,16 @@ proc renderClear*(renderer: ptr Renderer): bool {.
 proc renderPresent*(renderer: ptr Renderer): bool {.
   importc: "SDL_RenderPresent",
   header: "<SDL3/SDL_render.h>"
+.}
+
+proc getPerformanceCounter*(): uint64 {.
+  importc: "SDL_GetPerformanceCounter",
+  header: "<SDL3/SDL_timer.h>"
+.}
+
+proc getPerformanceFrequency*(): uint64 {.
+  importc: "SDL_GetPerformanceFrequency",
+  header: "<SDL3/SDL_timer.h>"
 .}
 
 proc getError*(): cstring {.

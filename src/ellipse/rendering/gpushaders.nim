@@ -24,6 +24,7 @@ proc createShaderFromFile*(
   path: string,
   stage: GPUShaderStage,
   numSamplers: uint32,
+  numUniformBuffers: uint32 = 0,
   entrypoint: cstring = "main",
   format: GPUShaderFormat = GPU_SHADERFORMAT_SPIRV
 ): GPUShaderHandle =
@@ -40,7 +41,7 @@ proc createShaderFromFile*(
     num_samplers: numSamplers,
     num_storage_textures: 0,
     num_storage_buffers: 0,
-    num_uniform_buffers: 0,
+    num_uniform_buffers: numUniformBuffers,
     props: 0
   )
 
@@ -48,4 +49,3 @@ proc createShaderFromFile*(
     result = createGPUShader(device, createInfo)
   except SDL3gpuext.Error as err:
     raise newException(ShaderLoadError, &"createGPUShader failed for '{path}': " & err.msg)
-

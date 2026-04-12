@@ -1,11 +1,16 @@
-import std/[macros]
+import std/[macros, strutils]
 import ../plugins
 import ./SDL3
-import ./SDL3ext
+import ./SDL3gpu
+import ./SDL3gpuext
+import ../rendering/[artist2D, gpucontext]
 
-export macros, plugins, SDL3, SDL3ext
+export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, artist2D, gpucontext
 
 {.push raises: [].}
+
+const
+  appOverlaySpriteBudget = 256
 
 type
   AppConfig* = object
@@ -14,6 +19,13 @@ type
     width*: int
     height*: int
     windowFlags*: WindowFlags
+    resizable*: bool
+    shaderFormat*: GPUShaderFormat
+    driverName*: cstring
+    debugMode*: bool
+    maxSprites*: int
+    maxTextureSlots*: int
+    clearColor*: FColor
 
   Application*[T] = object
     config*: AppConfig
@@ -22,9 +34,11 @@ type
     scenes*: SceneStack
     quitRequested*: bool
     state*: T
-    sdl: AppHandle
-    window: WindowHandle
-    renderer: RendererHandle
+    context*: GPUWindowContext
+    artist*: Artist2D
+    fpsText: string
+    fps*: cfloat
+    lastCounter: uint64
 
 template sdlError(prefix: string): string =
   prefix & ": " & $getError()
@@ -101,16 +115,51 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       return appFailure
 
     try:
-      gApplication.sdl = SDL3ext.init(INIT_VIDEO)
-      gApplication.window = SDL3ext.createWindow(
-        gApplication.config.title,
-        gApplication.config.width,
-        gApplication.config.height,
-        gApplication.config.windowFlags
+      gApplication.context = initGPUWindowContext(
+        GPUWindowConfig(
+          appId: gApplication.config.appId,
+          title: gApplication.config.title,
+          width: gApplication.config.width,
+          height: gApplication.config.height,
+          windowFlags: gApplication.config.windowFlags,
+          resizable: gApplication.config.resizable,
+          shaderFormat:
+            if gApplication.config.shaderFormat != 0:
+              gApplication.config.shaderFormat
+            else:
+              GPU_SHADERFORMAT_SPIRV,
+          driverName:
+            if not gApplication.config.driverName.isNil:
+              gApplication.config.driverName
+            else:
+              "vulkan",
+          debugMode: gApplication.config.debugMode
+        )
       )
-      gApplication.renderer = SDL3ext.createRenderer(gApplication.window)
-    except Error as err:
+      gApplication.artist = initArtist2D(
+        gApplication.context.device,
+        getGPUSwapchainTextureFormat(gApplication.context.claim),
+        Artist2DConfig(
+          maxSprites:
+            if gApplication.config.maxSprites > 0:
+              gApplication.config.maxSprites + appOverlaySpriteBudget
+            else:
+              100_000 + appOverlaySpriteBudget,
+          maxTextureSlots:
+            if gApplication.config.maxTextureSlots > 0:
+              gApplication.config.maxTextureSlots
+            else:
+              8
+        )
+      )
+      gApplication.lastCounter = getPerformanceCounter()
+      gApplication.fpsText = "FPS: --"
+    except SDL3gpuext.Error as err:
       flushStderr(err.msg)
+      gApplication.destroyApplication()
+      return appFailure
+    except CatchableError as err:
+      reportException("application init failed", err)
       gApplication.destroyApplication()
       return appFailure
 
@@ -120,9 +169,10 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       scenes {.inject.} = gApplication.scenes
       pluginStates {.inject.} = gApplication.pluginStates
       messages {.inject.} = gApplication.messages
-      window {.inject.} = raw(gApplication.window)
-      renderer {.inject.} = raw(gApplication.renderer)
       quit {.inject.} = gApplication.quitRequested
+    template window: untyped {.inject, used.} = raw(gApplication.context.window)
+    template device: untyped {.inject, used.} = raw(gApplication.context.device)
+    template artist: untyped {.inject, used.} = gApplication.artist
 
     withFields(gApplication.state, gApplication):
       try:
@@ -146,9 +196,10 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       scenes {.inject.} = app.scenes
       pluginStates {.inject.} = app.pluginStates
       messages {.inject.} = app.messages
-      window {.inject.} = raw(app.window)
-      renderer {.inject.} = raw(app.renderer)
       quit {.inject.} = app.quitRequested
+    template window: untyped {.inject, used.} = raw(app.context.window)
+    template device: untyped {.inject, used.} = raw(app.context.device)
+    template artist: untyped {.inject, used.} = app.artist
 
     scenes.startFrame()
     scenes.handlePushed()
@@ -171,28 +222,72 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     if app.quitRequested:
       return appSuccess
 
-    if not setRenderDrawColor(raw(app.renderer), 0'u8, 0'u8, 0'u8, 255'u8):
-      flushStderr(sdlError("setRenderDrawColor failed"))
+    let counter = getPerformanceCounter()
+    if app.lastCounter != 0:
+      let delta = counter - app.lastCounter
+      if delta > 0:
+        app.fps = getPerformanceFrequency().cfloat / delta.cfloat
+        app.fpsText = "FPS: " & formatFloat(app.fps, ffDecimal, 1)
+    app.lastCounter = counter
+
+    let commandBuffer =
+      try:
+        acquireGPUCommandBuffer(app.context.device)
+      except SDL3gpuext.Error as err:
+        flushStderr(err.msg)
+        return appFailure
+
+    var swapchainTexture: ptr GPUTexture
+    var swapchainWidth: uint32
+    var swapchainHeight: uint32
+    if not waitAndAcquireGPUSwapchainTexture(
+      commandBuffer,
+      raw(app.context.window),
+      addr swapchainTexture,
+      addr swapchainWidth,
+      addr swapchainHeight
+    ):
+      flushStderr(sdlError("waitAndAcquireGPUSwapchainTexture failed"))
+      discard cancelGPUCommandBuffer(commandBuffer)
       return appFailure
 
-    if not renderClear(raw(app.renderer)):
-      flushStderr(sdlError("renderClear failed"))
-      return appFailure
+    if swapchainTexture.isNil:
+      return if submitGPUCommandBuffer(commandBuffer): appContinue else: appFailure
+
+    beginFrame(app.artist)
 
     block:
       var
         pluginStates {.inject.} = app.pluginStates
         messages {.inject.} = app.messages
         scenes {.inject.} = app.scenes
-        window {.inject.} = raw(app.window)
-        renderer {.inject.} = raw(app.renderer)
         quit {.inject.} = app.quitRequested
+      template window: untyped {.inject, used.} = raw(app.context.window)
+      template device: untyped {.inject, used.} = raw(app.context.device)
+      template artist: untyped {.inject, used.} = app.artist
+      template swapchainWidth: untyped {.inject, used.} = swapchainWidth
+      template swapchainHeight: untyped {.inject, used.} = swapchainHeight
 
       withFields(app.state, app):
         try:
           generatePluginStep(draw)
+          discard drawText(
+            app.artist,
+            app.fpsText,
+            [14'f32, 14'f32],
+            [0'f32, 0'f32, 0'f32, 0.9'f32],
+            2'f32
+          )
+          discard drawText(
+            app.artist,
+            app.fpsText,
+            [12'f32, 12'f32],
+            [1'f32, 0.95'f32, 0.35'f32, 1'f32],
+            2'f32
+          )
         except CatchableError as err:
           reportException("application draw failed", err)
+          discard cancelGPUCommandBuffer(commandBuffer)
           return appFailure
 
       app.pluginStates = pluginStates
@@ -200,8 +295,25 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       app.scenes = scenes
       app.quitRequested = quit
 
-    if not renderPresent(raw(app.renderer)):
-      flushStderr(sdlError("renderPresent failed"))
+    try:
+      render(
+        app.artist,
+        commandBuffer,
+        swapchainTexture,
+        swapchainWidth,
+        swapchainHeight,
+        if app.config.clearColor == default(FColor):
+          FColor(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
+        else:
+          app.config.clearColor
+      )
+    except CatchableError as err:
+      reportException("application render failed", err)
+      discard cancelGPUCommandBuffer(commandBuffer)
+      return appFailure
+
+    if not submitGPUCommandBuffer(commandBuffer):
+      flushStderr(sdlError("submitGPUCommandBuffer failed"))
       return appFailure
 
     appContinue

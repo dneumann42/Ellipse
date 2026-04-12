@@ -12,6 +12,7 @@ type
     width*: int
     height*: int
     windowFlags*: WindowFlags
+    resizable*: bool
     shaderFormat*: GPUShaderFormat
     driverName*: cstring
     debugMode*: bool
@@ -42,7 +43,7 @@ proc initGPUWindowContext*(config: GPUWindowConfig): GPUWindowContext =
     config.title,
     config.width,
     config.height,
-    config.windowFlags
+    config.windowFlags or (if config.resizable: WINDOW_RESIZABLE else: 0'u64)
   )
   result.device = SDL3gpuext.createGPUDevice(
     config.shaderFormat,
