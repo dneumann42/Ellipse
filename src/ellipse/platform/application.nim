@@ -15,16 +15,16 @@ type
     height*: int
     windowFlags*: WindowFlags
 
-  AppState*[T] = object
+  Application*[T] = object
     config*: AppConfig
-    sdl*: AppHandle
-    window*: WindowHandle
-    renderer*: RendererHandle
     pluginStates*: PluginStates
     messages*: PluginMessages
     scenes*: SceneStack
     quitRequested*: bool
     state*: T
+    sdl: AppHandle
+    window: WindowHandle
+    renderer: RendererHandle
 
 template sdlError(prefix: string): string =
   prefix & ": " & $getError()
@@ -65,95 +65,95 @@ proc reportException(context: string; err: ref CatchableError) =
   if trace.len > 0:
     flushStderr(trace)
 
-proc destroyAppState[T](state: ref AppState[T]) =
-  if state.isNil:
+proc destroyApplication[T](app: ref Application[T]) =
+  if app.isNil:
     return
-  reset(state[])
+  reset(app[])
 
 template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
-  var gAppState {.global.}: ref AppState[T]
+  var gApplication {.global.}: ref Application[T]
 
   proc appInitCallback(
     appState: ptr pointer,
     argc: cint,
     argv: cstringArray
-  ): AppResult {.cdecl, gcsafe.} =
+  ): AppResult {.cdecl.} =
     discard argc
     discard argv
 
-    new(gAppState)
-    gAppState[] = AppState[T](
+    new(gApplication)
+    gApplication[] = Application[T](
       config: cfg,
       messages: PluginMessages.init(),
       scenes: SceneStack.new(),
       state: initialState
     )
 
-    appState[] = cast[pointer](gAppState)
+    appState[] = cast[pointer](gApplication)
 
     if not setAppMetadata(
-      gAppState.config.title.cstring,
+      gApplication.config.title.cstring,
       "0.0.0",
-      gAppState.config.appId.cstring
+      gApplication.config.appId.cstring
     ):
       flushStderr(sdlError("setAppMetadata failed"))
-      gAppState.destroyAppState()
+      gApplication.destroyApplication()
       return appFailure
 
     try:
-      gAppState.sdl = init(INIT_VIDEO)
-      gAppState.window = createWindow(
-        gAppState.config.title,
-        gAppState.config.width,
-        gAppState.config.height,
-        gAppState.config.windowFlags
+      gApplication.sdl = SDL3ext.init(INIT_VIDEO)
+      gApplication.window = SDL3ext.createWindow(
+        gApplication.config.title,
+        gApplication.config.width,
+        gApplication.config.height,
+        gApplication.config.windowFlags
       )
-      gAppState.renderer = createRenderer(gAppState.window)
+      gApplication.renderer = SDL3ext.createRenderer(gApplication.window)
     except Error as err:
       flushStderr(err.msg)
-      gAppState.destroyAppState()
+      gApplication.destroyApplication()
       return appFailure
 
-    generatePluginStateInitialize(gAppState.pluginStates)
+    generatePluginStateInitialize(gApplication.pluginStates)
 
     var
-      scenes {.inject.} = gAppState.scenes
-      pluginStates {.inject.} = gAppState.pluginStates
-      messages {.inject.} = gAppState.messages
-      window {.inject.} = raw(gAppState.window)
-      renderer {.inject.} = raw(gAppState.renderer)
-      quit {.inject.} = gAppState.quitRequested
+      scenes {.inject.} = gApplication.scenes
+      pluginStates {.inject.} = gApplication.pluginStates
+      messages {.inject.} = gApplication.messages
+      window {.inject.} = raw(gApplication.window)
+      renderer {.inject.} = raw(gApplication.renderer)
+      quit {.inject.} = gApplication.quitRequested
 
-    withFields(gAppState.state, gAppState):
+    withFields(gApplication.state, gApplication):
       try:
         generatePluginStep(load)
       except CatchableError as err:
         reportException("application load failed", err)
-        gAppState.destroyAppState()
+        gApplication.destroyApplication()
         return appFailure
 
-    gAppState.scenes = scenes
-    gAppState.pluginStates = pluginStates
-    gAppState.messages = messages
-    gAppState.quitRequested = quit
+    gApplication.scenes = scenes
+    gApplication.pluginStates = pluginStates
+    gApplication.messages = messages
+    gApplication.quitRequested = quit
 
     appContinue
 
-  proc iterateCallback(appState: pointer): AppResult {.cdecl, gcsafe.} =
-    let state = cast[ref AppState[T]](appState)
+  proc iterateCallback(appState: pointer): AppResult {.cdecl.} =
+    let app = cast[ref Application[T]](appState)
 
     var
-      scenes {.inject.} = state.scenes
-      pluginStates {.inject.} = state.pluginStates
-      messages {.inject.} = state.messages
-      window {.inject.} = raw(state.window)
-      renderer {.inject.} = raw(state.renderer)
-      quit {.inject.} = state.quitRequested
+      scenes {.inject.} = app.scenes
+      pluginStates {.inject.} = app.pluginStates
+      messages {.inject.} = app.messages
+      window {.inject.} = raw(app.window)
+      renderer {.inject.} = raw(app.renderer)
+      quit {.inject.} = app.quitRequested
 
     scenes.startFrame()
     scenes.handlePushed()
 
-    withFields(state.state, state):
+    withFields(app.state, app):
       try:
         generatePluginStep(loadScene)
         generateListenStep(messages)
@@ -163,69 +163,70 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         reportException("application update failed", err)
         return appFailure
 
-    state.scenes = scenes
-    state.pluginStates = pluginStates
-    state.messages = messages
-    state.quitRequested = quit
+    app.scenes = scenes
+    app.pluginStates = pluginStates
+    app.messages = messages
+    app.quitRequested = quit
 
-    if state.quitRequested:
+    if app.quitRequested:
       return appSuccess
 
-    if not setRenderDrawColor(raw(state.renderer), 0'u8, 0'u8, 0'u8, 255'u8):
+    if not setRenderDrawColor(raw(app.renderer), 0'u8, 0'u8, 0'u8, 255'u8):
       flushStderr(sdlError("setRenderDrawColor failed"))
       return appFailure
 
-    if not renderClear(raw(state.renderer)):
+    if not renderClear(raw(app.renderer)):
       flushStderr(sdlError("renderClear failed"))
       return appFailure
 
-    var
-      pluginStates {.inject.} = state.pluginStates
-      messages {.inject.} = state.messages
-      scenes {.inject.} = state.scenes
-      window {.inject.} = raw(state.window)
-      renderer {.inject.} = raw(state.renderer)
-      quit {.inject.} = state.quitRequested
+    block:
+      var
+        pluginStates {.inject.} = app.pluginStates
+        messages {.inject.} = app.messages
+        scenes {.inject.} = app.scenes
+        window {.inject.} = raw(app.window)
+        renderer {.inject.} = raw(app.renderer)
+        quit {.inject.} = app.quitRequested
 
-    withFields(state.state, state):
-      try:
-        generatePluginStep(draw)
-      except CatchableError as err:
-        reportException("application draw failed", err)
-        return appFailure
+      withFields(app.state, app):
+        try:
+          generatePluginStep(draw)
+        except CatchableError as err:
+          reportException("application draw failed", err)
+          return appFailure
 
-    state.pluginStates = pluginStates
-    state.messages = messages
-    state.scenes = scenes
-    state.quitRequested = quit
+      app.pluginStates = pluginStates
+      app.messages = messages
+      app.scenes = scenes
+      app.quitRequested = quit
 
-    if not renderPresent(raw(state.renderer)):
+    if not renderPresent(raw(app.renderer)):
       flushStderr(sdlError("renderPresent failed"))
       return appFailure
 
     appContinue
 
-  proc eventCallback(appState: pointer; event: ptr Event): AppResult {.cdecl, gcsafe.} =
-    let state = cast[ref AppState[T]](appState)
+  proc eventCallback(appState: pointer; event: ptr Event): AppResult {.cdecl.} =
+    let app = cast[ref Application[T]](appState)
 
     case event[].`type`
     of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED:
-      state.quitRequested = true
+      app.quitRequested = true
       appSuccess
     else:
       appContinue
 
-  proc quitCallback(appState: pointer; result: AppResult) {.cdecl, gcsafe.} =
+  proc quitCallback(appState: pointer; result: AppResult) {.cdecl.} =
     discard result
 
-    let state =
+    let app =
       if appState.isNil:
-        gAppState
+        gApplication
       else:
-        cast[ref AppState[T]](appState)
+        cast[ref Application[T]](appState)
 
-    state.destroyAppState()
-    gAppState = nil
+    app.destroyApplication()
+    gApplication = nil
 
   discard enterAppMainCallbacks(
     0,
