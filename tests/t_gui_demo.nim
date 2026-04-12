@@ -9,6 +9,25 @@ proc accentName(index: int): string =
   of 2: "cyan"
   else: "gold"
 
+const
+  themeOptions = ["gold", "amber", "cyan", "mint"]
+  stationList = [
+    "Bridge",
+    "Engineering",
+    "Hangar",
+    "Hydroponics",
+    "Navigation",
+    "Security",
+    "Archive",
+    "Observatory"
+  ]
+
+proc selectedStationName(index: int): string =
+  if index >= 0 and index < stationList.len:
+    stationList[index]
+  else:
+    "(none)"
+
 widget ReactorCard:
   state:
     count: int = 0
@@ -51,6 +70,11 @@ widget ControlDeck:
     callsign: string = ""
     totalClicks: int = 0
     lastEvent: string = "Waiting for input"
+    shieldsEnabled: bool = true
+    powerMix: float = 42.0
+    thrustBias: float = 0.35
+    stationIndex: int = 2
+    theme: string = themeOptions[0]
     left: ReactorCard = ReactorCard()
     right: ReactorCard = ReactorCard()
 
@@ -83,26 +107,57 @@ widget ControlDeck:
         label("Last event: " & state.lastEvent)
 
         hbox:
-          container:
-            reactorCard("Port Reactor", "deck.left", state.left)
-          container:
-            reactorCard("Starboard Reactor", "deck.right", state.right)
+          vbox:
+            hbox:
+              container:
+                reactorCard("Port Reactor", "deck.left", state.left)
+              container:
+                reactorCard("Starboard Reactor", "deck.right", state.right)
 
-        hbox:
-          button("Sync Colors", ElemId"deck.sync"):
-            onClick:
-              let target = (state.left.accent + 1) mod 3
-              state.left.accent = target
-              state.right.accent = target
-              state.lastEvent = "Synchronized both reactors to " & accentName(target)
+            hbox:
+              button("Sync Colors", ElemId"deck.sync"):
+                onClick:
+                  let target = (state.left.accent + 1) mod 3
+                  state.left.accent = target
+                  state.right.accent = target
+                  state.lastEvent = "Synchronized both reactors to " & accentName(target)
 
-          button("Reset Mission", ElemId"deck.reset"):
-            onClick:
-              state.callsign.setLen(0)
-              state.totalClicks = 0
-              state.lastEvent = "Mission state reset"
-              state.left = ReactorCard()
-              state.right = ReactorCard()
+              button("Reset Mission", ElemId"deck.reset"):
+                onClick:
+                  state.callsign.setLen(0)
+                  state.totalClicks = 0
+                  state.lastEvent = "Mission state reset"
+                  state.shieldsEnabled = true
+                  state.powerMix = 42.0
+                  state.thrustBias = 0.35
+                  state.stationIndex = 2
+                  state.theme = themeOptions[0]
+                  state.left = ReactorCard()
+                  state.right = ReactorCard()
+
+          panel("Control Surface", ElemId"deck.controls"):
+            hbox:
+              vbox:
+                checkbox("Shields Enabled", state.shieldsEnabled, ElemId"deck.shields")
+
+                vbox:
+                  label("Power Mix: " & $int(state.powerMix))
+                  hslider(state.powerMix, 0.0, 100.0, ElemId"deck.powerMix")
+
+                vbox:
+                  label("Active Theme")
+                  comboBox(state.theme, ElemId"deck.theme"):
+                    for option in themeOptions:
+                      comboOption(option, option)
+
+              vbox:
+                label("Thrust Bias: " & $int(state.thrustBias * 100.0) & "%")
+                vslider(state.thrustBias, 0.0, 1.0, ElemId"deck.thrust")
+
+              vbox:
+                label("Station Queue")
+                listBox(state.stationIndex, stationList, ElemId"deck.stations", 4)
+                label("Selected Station: " & selectedStationName(state.stationIndex))
 
 type
   DemoState = object
@@ -123,7 +178,7 @@ when isMainModule:
     AppConfig(
       appId: "dev.ellipse.tests.guidemo",
       title: "Ellipse GUI Demo",
-      width: 1280,
+      width: 1600,
       height: 720,
       windowFlags: 0,
       resizable: true,
