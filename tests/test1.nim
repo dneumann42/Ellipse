@@ -3,6 +3,8 @@ import os
 
 import ellipse/platform/SDL3
 import ellipse/platform/SDL3ext
+import ellipse/platform/SDL3gpu
+import ellipse/platform/SDL3gpuext
 
 suite "SDL3 binding smoke tests":
   test "core constants are available":
@@ -16,6 +18,31 @@ suite "SDL3 binding smoke tests":
     var event: Event
     event.`type` = EVENT_QUIT
     check event.`type` == EVENT_QUIT
+
+suite "SDL3 GPU binding smoke tests":
+  test "gpu constants are available":
+    check GPU_SHADERFORMAT_SPIRV == 0x2'u32
+    check GPU_TEXTUREFORMAT_R8G8B8A8_UNORM == 0x4'u32
+    check GPU_TEXTUREUSAGE_SAMPLER == 0x1'u32
+    check GPU_BUFFERUSAGE_VERTEX == 0x1'u32
+
+  test "gpu structs expose expected fields":
+    var samplerInfo = GPUSamplerCreateInfo(
+      min_filter: gpuFilterNearest,
+      mag_filter: gpuFilterNearest,
+      mipmap_mode: gpuSamplerMipmapModeNearest,
+      address_mode_u: gpuSamplerAddressModeRepeat,
+      address_mode_v: gpuSamplerAddressModeRepeat,
+      address_mode_w: gpuSamplerAddressModeRepeat
+    )
+    check samplerInfo.min_filter == gpuFilterNearest
+    check samplerInfo.address_mode_u == gpuSamplerAddressModeRepeat
+
+  test "gpu handle wrappers compile":
+    var device: GPUDeviceHandle
+    var texture: GPUTextureHandle
+    check raw(device).isNil
+    check raw(texture).isNil
 
 suite "SDL3ext ownership":
   test "properties are created and owned":
