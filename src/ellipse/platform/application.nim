@@ -3,9 +3,10 @@ import ../plugins
 import ./SDL3
 import ./SDL3gpu
 import ./SDL3gpuext
+import ../gui
 import ../rendering/[artist2D, canvases, gpucontext]
 
-export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, artist2D, canvases, gpucontext
+export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, canvases, gpucontext
 
 {.push raises: [].}
 
@@ -42,9 +43,11 @@ type
     context*: GPUWindowContext
     artist*: Artist2D
     canvasManager*: CanvasManager
+    gui*: GuiContext
     fpsText: string
     fps*: cfloat
     lastCounter: uint64
+    deltaSeconds*: float
 
 template sdlError(prefix: string): string =
   prefix & ": " & $getError()
@@ -89,6 +92,26 @@ proc destroyApplication[T](app: ref Application[T]) =
   if app.isNil:
     return
   reset(app[])
+
+proc normalizedWindowPosition[T](
+  app: ref Application[T];
+  x: cfloat;
+  y: cfloat
+): tuple[x, y: int] =
+  var logicalWidth: cint
+  var logicalHeight: cint
+  var pixelWidth: cint
+  var pixelHeight: cint
+
+  if getWindowSize(raw(app.context.window), addr logicalWidth, addr logicalHeight) and
+      getWindowSizeInPixels(raw(app.context.window), addr pixelWidth, addr pixelHeight) and
+      logicalWidth > 0 and logicalHeight > 0 and pixelWidth > 0 and pixelHeight > 0:
+    return (
+      x: int(x.float * pixelWidth.float / logicalWidth.float),
+      y: int(y.float * pixelHeight.float / logicalHeight.float)
+    )
+
+  (x: int(x), y: int(y))
 
 template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
   var gApplication {.global.}: ref Application[T]
@@ -160,8 +183,12 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         artistConfig
       )
       gApplication.canvasManager = initCanvasManager(gApplication.context.device, artistConfig)
+      gApplication.gui = initGuiContext()
       gApplication.lastCounter = getPerformanceCounter()
+      gApplication.deltaSeconds = 1.0 / 60.0
       gApplication.fpsText = "FPS: --"
+      if not startTextInput(raw(gApplication.context.window)):
+        raise newException(CatchableError, sdlError("startTextInput failed"))
     except SDL3gpuext.Error as err:
       flushStderr(err.msg)
       gApplication.destroyApplication()
@@ -201,6 +228,8 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
 
   proc iterateCallback(appState: pointer): AppResult {.cdecl.} =
     let app = cast[ref Application[T]](appState)
+    defer:
+      app.gui.clearTransientInput()
 
     var
       scenes {.inject.} = app.scenes
@@ -240,6 +269,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       if delta > 0:
         app.fps = getPerformanceFrequency().cfloat / delta.cfloat
         app.fpsText = "FPS: " & formatFloat(app.fps, ffDecimal, 1)
+        app.deltaSeconds = delta.float / getPerformanceFrequency().float
     app.lastCounter = counter
 
     let commandBuffer =
@@ -276,6 +306,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       return appFailure
 
     block:
+      app.gui.beginFrame()
       var
         pluginStates {.inject.} = app.pluginStates
         messages {.inject.} = app.messages
@@ -286,6 +317,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       template canvases: untyped {.inject, used.} = app.canvasManager
       template artist: untyped {.inject, used.} =
         currentArtistPtr(app.canvasManager, addr app.artist)[]
+      template ui: untyped {.inject, used.} = app.gui.ui
       template swapchainWidth: untyped {.inject, used.} = swapchainWidth
       template swapchainHeight: untyped {.inject, used.} = swapchainHeight
 
@@ -306,6 +338,12 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       sortForRendering(app.canvasManager)
       renderCanvases(app.canvasManager, commandBuffer)
       composeCanvases(app.canvasManager, app.artist, swapchainWidth, swapchainHeight)
+      app.gui.render(
+        app.artist,
+        swapchainWidth.int,
+        swapchainHeight.int,
+        app.deltaSeconds
+      )
       discard drawText(
         app.artist,
         app.fpsText,
@@ -350,11 +388,49 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       app.quitRequested = true
       appSuccess
     of EVENT_KEY_DOWN:
+      case event[].key.scancode.ord
+      of SCANCODE_BACKSPACE:
+        app.gui.pressBackspace()
+      of SCANCODE_RETURN:
+        app.gui.pressEnter()
+      of SCANCODE_TAB:
+        app.gui.pressTab()
+      else:
+        discard
       app.messages.send(KeyDownMessage(
         keycode: event[].key.key,
         scancode: event[].key.scancode,
         repeat: event[].key.repeat
       ))
+      appContinue
+    of EVENT_TEXT_INPUT:
+      if not event[].text.text.isNil:
+        app.gui.appendTextInput($event[].text.text)
+      appContinue
+    of EVENT_MOUSE_MOTION:
+      let pos = app.normalizedWindowPosition(event[].motion.x, event[].motion.y)
+      app.gui.setMousePosition(pos.x, pos.y)
+      appContinue
+    of EVENT_MOUSE_BUTTON_DOWN, EVENT_MOUSE_BUTTON_UP:
+      let pos = app.normalizedWindowPosition(event[].button.x, event[].button.y)
+      app.gui.setMousePosition(pos.x, pos.y)
+      case event[].button.button
+      of BUTTON_LEFT:
+        app.gui.setActionButton(event[].button.down)
+      of BUTTON_RIGHT:
+        app.gui.setDragButton(event[].button.down)
+      else:
+        discard
+      appContinue
+    of EVENT_MOUSE_WHEEL:
+      let pos = app.normalizedWindowPosition(event[].wheel.mouse_x, event[].wheel.mouse_y)
+      app.gui.setMousePosition(pos.x, pos.y)
+      let scrollY =
+        if event[].wheel.direction == mouseWheelFlipped:
+          -event[].wheel.y.float
+        else:
+          event[].wheel.y.float
+      app.gui.addScroll(scrollY * 24.0)
       appContinue
     else:
       appContinue
@@ -367,6 +443,9 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         gApplication
       else:
         cast[ref Application[T]](appState)
+
+    if not app.isNil and not raw(app.context.window).isNil:
+      discard stopTextInput(raw(app.context.window))
 
     app.destroyApplication()
     gApplication = nil

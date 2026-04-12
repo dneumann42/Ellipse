@@ -10,11 +10,17 @@ type
   AudioDeviceID* = uint32
   WindowID* = uint32
   KeyboardID* = uint32
+  MouseID* = uint32
   Keycode* = uint32
   Keymod* = uint16
+  MouseButtonFlags* = uint32
 
   Scancode* {.size: sizeof(cint), importc: "SDL_Scancode", header: "<SDL3/SDL_scancode.h>".} = enum
     scancodeUnknown = 0
+
+  MouseWheelDirection* {.size: sizeof(cint), importc: "SDL_MouseWheelDirection", header: "<SDL3/SDL_mouse.h>".} = enum
+    mouseWheelNormal = 0
+    mouseWheelFlipped = 1
 
   TextureAccess* {.size: sizeof(cint), importc: "SDL_TextureAccess", header: "<SDL3/SDL_render.h>".} = enum
     textureAccessStatic = 0
@@ -60,9 +66,59 @@ type
     down*: bool
     repeat*: bool
 
+  TextInputEvent* {.importc: "SDL_TextInputEvent", header: "<SDL3/SDL_events.h>", bycopy.} = object
+    `type`*: EventType
+    reserved*: uint32
+    timestamp*: uint64
+    windowID*: WindowID
+    text*: cstring
+
+  MouseMotionEvent* {.importc: "SDL_MouseMotionEvent", header: "<SDL3/SDL_events.h>", bycopy.} = object
+    `type`*: EventType
+    reserved*: uint32
+    timestamp*: uint64
+    windowID*: WindowID
+    which*: MouseID
+    state*: MouseButtonFlags
+    x*: cfloat
+    y*: cfloat
+    xrel*: cfloat
+    yrel*: cfloat
+
+  MouseButtonEvent* {.importc: "SDL_MouseButtonEvent", header: "<SDL3/SDL_events.h>", bycopy.} = object
+    `type`*: EventType
+    reserved*: uint32
+    timestamp*: uint64
+    windowID*: WindowID
+    which*: MouseID
+    button*: uint8
+    down*: bool
+    clicks*: uint8
+    padding1*: uint8
+    x*: cfloat
+    y*: cfloat
+
+  MouseWheelEvent* {.importc: "SDL_MouseWheelEvent", header: "<SDL3/SDL_events.h>", bycopy.} = object
+    `type`*: EventType
+    reserved*: uint32
+    timestamp*: uint64
+    windowID*: WindowID
+    which*: MouseID
+    x*: cfloat
+    y*: cfloat
+    direction*: MouseWheelDirection
+    mouse_x*: cfloat
+    mouse_y*: cfloat
+    integer_x*: cint
+    integer_y*: cint
+
   Event* {.importc: "SDL_Event", header: "<SDL3/SDL_events.h>", union, bycopy.} = object
     `type`*: EventType
     key*: KeyboardEvent
+    text*: TextInputEvent
+    motion*: MouseMotionEvent
+    button*: MouseButtonEvent
+    wheel*: MouseWheelEvent
     padding*: array[128, byte]
 
   AppInitFunc* = proc(appState: ptr pointer; argc: cint; argv: cstringArray): AppResult {.cdecl.}
@@ -78,6 +134,12 @@ const
 
   EVENT_QUIT* = 0x00000100'u32
   EVENT_KEY_DOWN* = 0x00000300'u32
+  EVENT_KEY_UP* = 0x00000301'u32
+  EVENT_TEXT_INPUT* = 0x00000303'u32
+  EVENT_MOUSE_MOTION* = 0x00000400'u32
+  EVENT_MOUSE_BUTTON_DOWN* = 0x00000401'u32
+  EVENT_MOUSE_BUTTON_UP* = 0x00000402'u32
+  EVENT_MOUSE_WHEEL* = 0x00000403'u32
   EVENT_WINDOW_CLOSE_REQUESTED* = 0x00000210'u32
 
   PIXELFORMAT_UNKNOWN* = 0x00000000'u32
@@ -94,6 +156,11 @@ const
   SCANCODE_2* = 31
   SCANCODE_3* = 32
   SCANCODE_4* = 33
+  SCANCODE_RETURN* = 40
+  SCANCODE_BACKSPACE* = 42
+  SCANCODE_TAB* = 43
+  BUTTON_LEFT* = 1'u8
+  BUTTON_RIGHT* = 3'u8
 
 proc setAppMetadata*(
   appName: cstring,
@@ -118,6 +185,24 @@ proc createWindow*(
   flags: WindowFlags
 ): ptr Window {.
   importc: "SDL_CreateWindow",
+  header: "<SDL3/SDL_video.h>"
+.}
+
+proc getWindowSizeInPixels*(
+  window: ptr Window,
+  w: ptr cint,
+  h: ptr cint
+): bool {.
+  importc: "SDL_GetWindowSizeInPixels",
+  header: "<SDL3/SDL_video.h>"
+.}
+
+proc getWindowSize*(
+  window: ptr Window,
+  w: ptr cint,
+  h: ptr cint
+): bool {.
+  importc: "SDL_GetWindowSize",
   header: "<SDL3/SDL_video.h>"
 .}
 
@@ -292,6 +377,16 @@ proc getPerformanceFrequency*(): uint64 {.
 proc getError*(): cstring {.
   importc: "SDL_GetError",
   header: "<SDL3/SDL_error.h>"
+.}
+
+proc startTextInput*(window: ptr Window): bool {.
+  importc: "SDL_StartTextInput",
+  header: "<SDL3/SDL_keyboard.h>"
+.}
+
+proc stopTextInput*(window: ptr Window): bool {.
+  importc: "SDL_StopTextInput",
+  header: "<SDL3/SDL_keyboard.h>"
 .}
 
 proc free*(mem: pointer) {.
