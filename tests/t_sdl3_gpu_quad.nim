@@ -1,22 +1,23 @@
-import std/[os, strformat]
+import std/[os]
 
 import ellipse/platform/SDL3
 import ellipse/platform/SDL3gpu
-import ellipse/platform/SDL3ext
 import ellipse/platform/SDL3gpuext
+import ellipse/rendering/[gpucontext, gpupipelines, gpushaders, gpuuploads]
 
 type
   DemoError = object of CatchableError
 
+  # This vertex layout belongs to the demo because it matches this sample's
+  # concrete shaders and geometry. Other applications can define their own.
   Vertex = object
     position: array[2, cfloat]
     uv: array[2, cfloat]
 
+  # This state is deliberately sample-specific: one window context plus the
+  # resources needed to draw a single checkerboard-textured quad.
   DemoState = object
-    sdl: AppHandle
-    window: WindowHandle
-    claim: GPUWindowClaimHandle
-    device: GPUDeviceHandle
+    context: GPUWindowContext
     vertexBuffer: GPUBufferHandle
     texture: GPUTextureHandle
     sampler: GPUSamplerHandle
@@ -33,45 +34,12 @@ const
 
 var gDemo: DemoState
 
-proc require(condition: bool; message: string) =
-  if not condition:
-    raise newException(DemoError, message & ": " & $getError())
-
+# Asset lookup stays in the demo because the file layout is sample-specific.
 proc shaderPath(name: string): string =
   shaderDir / name
 
-proc loadShaderCode(path: string): string =
-  if not fileExists(path):
-    raise newException(
-      DemoError,
-      &"Missing shader binary '{path}'. Run `nimble build_gpu_shaders` first."
-    )
-  readFile(path)
-
-proc createShader(
-  device: GPUDeviceHandle,
-  path: string,
-  stage: GPUShaderStage,
-  numSamplers: uint32
-): GPUShaderHandle =
-  let code = loadShaderCode(path)
-  let createInfo = GPUShaderCreateInfo(
-    code_size: csize_t(code.len),
-    code: cast[ptr uint8](unsafeAddr code[0]),
-    entrypoint: "main",
-    format: GPU_SHADERFORMAT_SPIRV,
-    stage: stage,
-    num_samplers: numSamplers,
-    num_storage_textures: 0,
-    num_storage_buffers: 0,
-    num_uniform_buffers: 0,
-    props: 0
-  )
-  try:
-    result = createGPUShader(device, createInfo)
-  except SDL3gpuext.Error as err:
-    raise newException(DemoError, &"createGPUShader failed for '{path}': " & err.msg)
-
+# This quad geometry is the concrete mesh for this sample. More general mesh
+# builders can be added later without changing the reusable rendering modules.
 proc quadVertices(): array[6, Vertex] =
   [
     Vertex(position: [-0.6'f32, -0.6'f32], uv: [0.0'f32, 1.0'f32]),
@@ -82,6 +50,8 @@ proc quadVertices(): array[6, Vertex] =
     Vertex(position: [-0.6'f32,  0.6'f32], uv: [0.0'f32, 0.0'f32])
   ]
 
+# The checkerboard is also demo-specific. Another app might load files, render
+# to textures, or generate very different procedural content.
 proc checkerPixels(size: int): seq[uint8] =
   result = newSeq[uint8](size * size * 4)
   let cellSize = max(1, size div 8)
@@ -99,71 +69,8 @@ proc checkerPixels(size: int): seq[uint8] =
       result[offset + 2] = color[2]
       result[offset + 3] = color[3]
 
-proc uploadBytes(device: GPUDeviceHandle; target: GPUBufferHandle; data: pointer; size: int) =
-  let transferInfo = GPUTransferBufferCreateInfo(
-    usage: gpuTransferBufferUsageUpload,
-    size: uint32(size),
-    props: 0
-  )
-  let transferBuffer = createGPUTransferBuffer(device, transferInfo)
-
-  let mapped = mapGPUTransferBuffer(device, transferBuffer, false)
-  copyMem(mapped, data, size)
-  unmapGPUTransferBuffer(device, transferBuffer)
-
-  let commandBuffer = acquireGPUCommandBuffer(device)
-  let copyPass = beginGPUCopyPass(commandBuffer)
-  if copyPass.isNil:
-    discard cancelGPUCommandBuffer(commandBuffer)
-    raise newException(DemoError, "beginGPUCopyPass failed for vertex upload: " & $getError())
-
-  var source = GPUTransferBufferLocation(transfer_buffer: raw(transferBuffer), offset: 0)
-  var destination = GPUBufferRegion(buffer: raw(target), offset: 0, size: uint32(size))
-  uploadToGPUBuffer(copyPass, addr source, addr destination, false)
-  endGPUCopyPass(copyPass)
-  require(submitGPUCommandBuffer(commandBuffer), "submitGPUCommandBuffer failed for vertex upload")
-  waitForGPUIdle(device)
-
-proc uploadTexture(device: GPUDeviceHandle; texture: GPUTextureHandle; size: int; pixels: seq[uint8]) =
-  let transferInfo = GPUTransferBufferCreateInfo(
-    usage: gpuTransferBufferUsageUpload,
-    size: uint32(pixels.len),
-    props: 0
-  )
-  let transferBuffer = createGPUTransferBuffer(device, transferInfo)
-
-  let mapped = mapGPUTransferBuffer(device, transferBuffer, false)
-  copyMem(mapped, unsafeAddr pixels[0], pixels.len)
-  unmapGPUTransferBuffer(device, transferBuffer)
-
-  let commandBuffer = acquireGPUCommandBuffer(device)
-  let copyPass = beginGPUCopyPass(commandBuffer)
-  if copyPass.isNil:
-    discard cancelGPUCommandBuffer(commandBuffer)
-    raise newException(DemoError, "beginGPUCopyPass failed for texture upload: " & $getError())
-
-  var source = GPUTextureTransferInfo(
-    transfer_buffer: raw(transferBuffer),
-    offset: 0,
-    pixels_per_row: uint32(size),
-    rows_per_layer: uint32(size)
-  )
-  var destination = GPUTextureRegion(
-    texture: raw(texture),
-    mip_level: 0,
-    layer: 0,
-    x: 0,
-    y: 0,
-    z: 0,
-    w: uint32(size),
-    h: uint32(size),
-    d: 1
-  )
-  uploadToGPUTexture(copyPass, addr source, addr destination, false)
-  endGPUCopyPass(copyPass)
-  require(submitGPUCommandBuffer(commandBuffer), "submitGPUCommandBuffer failed for texture upload")
-  waitForGPUIdle(device)
-
+# The pipeline helper is generic, but the vertex layout remains here because it
+# is tied to the `Vertex` type and the sample's shader inputs.
 proc createPipeline(state: var DemoState) =
   var vertexBufferDesc = GPUVertexBufferDescription(
     slot: 0,
@@ -186,66 +93,42 @@ proc createPipeline(state: var DemoState) =
     )
   ]
 
-  let swapchainFormat = getGPUSwapchainTextureFormat(state.claim)
-  var colorTarget = GPUColorTargetDescription(
-    format: swapchainFormat,
-    blend_state: GPUColorTargetBlendState(
-      color_write_mask: GPU_COLORCOMPONENT_R or GPU_COLORCOMPONENT_G or GPU_COLORCOMPONENT_B or GPU_COLORCOMPONENT_A,
-      enable_blend: false,
-      enable_color_write_mask: true
-    )
+  state.pipeline = createTexturedPipeline(
+    state.context.device,
+    getGPUSwapchainTextureFormat(state.context.claim),
+    state.vertexShader,
+    state.fragmentShader,
+    addr vertexBufferDesc,
+    1,
+    addr vertexAttributes[0],
+    uint32(vertexAttributes.len)
   )
-
-  var pipelineInfo = GPUGraphicsPipelineCreateInfo(
-    vertex_shader: raw(state.vertexShader),
-    fragment_shader: raw(state.fragmentShader),
-    vertex_input_state: GPUVertexInputState(
-      vertex_buffer_descriptions: addr vertexBufferDesc,
-      num_vertex_buffers: 1,
-      vertex_attributes: addr vertexAttributes[0],
-      num_vertex_attributes: uint32(vertexAttributes.len)
-    ),
-    primitive_type: gpuPrimitiveTypeTriangleList,
-    rasterizer_state: GPURasterizerState(
-      fill_mode: gpuFillModeFill,
-      cull_mode: gpuCullModeNone,
-      front_face: gpuFrontFaceCounterClockwise,
-      enable_depth_bias: false,
-      enable_depth_clip: true
-    ),
-    multisample_state: GPUMultisampleState(
-      sample_count: gpuSampleCount1,
-      sample_mask: 0,
-      enable_mask: false,
-      enable_alpha_to_coverage: false
-    ),
-    depth_stencil_state: GPUDepthStencilState(
-      compare_op: gpuCompareOpInvalid,
-      enable_depth_test: false,
-      enable_depth_write: false,
-      enable_stencil_test: false
-    ),
-    target_info: GPUGraphicsPipelineTargetInfo(
-      color_target_descriptions: addr colorTarget,
-      num_color_targets: 1,
-      depth_stencil_format: 0,
-      has_depth_stencil_target: false
-    ),
-    props: 0
-  )
-
-  state.pipeline = createGPUGraphicsPipeline(state.device, pipelineInfo)
 
 proc initializeResources(state: var DemoState) =
-  state.vertexShader = createShader(state.device, shaderPath("quad.vert.spv"), gpuShaderStageVertex, 0)
-  state.fragmentShader = createShader(state.device, shaderPath("quad.frag.spv"), gpuShaderStageFragment, 1)
+  # The demo chooses which shaders and resources to create; the rendering
+  # modules only supply the generic mechanics.
+  try:
+    state.vertexShader = createShaderFromFile(
+      state.context.device,
+      shaderPath("quad.vert.spv"),
+      gpuShaderStageVertex,
+      0
+    )
+    state.fragmentShader = createShaderFromFile(
+      state.context.device,
+      shaderPath("quad.frag.spv"),
+      gpuShaderStageFragment,
+      1
+    )
+  except ShaderLoadError as err:
+    raise newException(DemoError, err.msg)
 
   let bufferInfo = GPUBufferCreateInfo(
     usage: GPU_BUFFERUSAGE_VERTEX,
     size: uint32(sizeof(quadVertices())),
     props: 0
   )
-  state.vertexBuffer = createGPUBuffer(state.device, bufferInfo)
+  state.vertexBuffer = createGPUBuffer(state.context.device, bufferInfo)
 
   let textureInfo = GPUTextureCreateInfo(
     `type`: gpuTextureType2D,
@@ -258,7 +141,7 @@ proc initializeResources(state: var DemoState) =
     sample_count: gpuSampleCount1,
     props: 0
   )
-  state.texture = createGPUTexture(state.device, textureInfo)
+  state.texture = createGPUTexture(state.context.device, textureInfo)
 
   let samplerInfo = GPUSamplerCreateInfo(
     min_filter: gpuFilterNearest,
@@ -276,49 +159,67 @@ proc initializeResources(state: var DemoState) =
     enable_compare: false,
     props: 0
   )
-  state.sampler = createGPUSampler(state.device, samplerInfo)
+  state.sampler = createGPUSampler(state.context.device, samplerInfo)
 
   let vertices = quadVertices()
-  uploadBytes(
-    state.device,
-    state.vertexBuffer,
-    unsafeAddr vertices[0],
-    sizeof(vertices)
-  )
+  try:
+    uploadBufferData(
+      state.context.device,
+      state.vertexBuffer,
+      unsafeAddr vertices[0],
+      sizeof(vertices),
+      "quad vertex upload"
+    )
+  except UploadError as err:
+    raise newException(DemoError, err.msg)
 
   let pixels = checkerPixels(checkerSize)
-  uploadTexture(state.device, state.texture, checkerSize, pixels)
+  try:
+    uploadTexture2DData(
+      state.context.device,
+      state.texture,
+      checkerSize,
+      checkerSize,
+      pixels,
+      "checkerboard texture upload"
+    )
+  except UploadError as err:
+    raise newException(DemoError, err.msg)
+
   createPipeline(state)
 
 proc cleanup(state: var DemoState) =
-  if not raw(state.device).isNil:
+  if not raw(state.context.device).isNil:
     try:
-      waitForGPUIdle(state.device)
+      waitForGPUIdle(state.context.device)
     except SDL3gpuext.Error:
       discard
   var oldState = move(state)
   state = default(DemoState)
   discard oldState
 
+# The SDL callback shell remains in the test because it is application logic,
+# not generic engine code. Another app can reuse the rendering modules with a
+# completely different state model and frame loop.
 proc appInitCallback(appState: ptr pointer; argc: cint; argv: cstringArray): AppResult {.cdecl.} =
   discard argc
   discard argv
   appState[] = addr gDemo
   gDemo = default(DemoState)
 
-  if not setAppMetadata(
-    "Ellipse SDL3 GPU Quad",
-    "0.0.0",
-    "dev.ellipse.tests.sdl3gpuquad"
-  ):
-    echo "setAppMetadata failed: ", getError()
-    return appFailure
-
   try:
-    gDemo.sdl = SDL3ext.init(INIT_VIDEO)
-    gDemo.window = SDL3ext.createWindow("Ellipse SDL3 GPU Quad", windowWidth, windowHeight, 0)
-    gDemo.device = SDL3gpuext.createGPUDevice(GPU_SHADERFORMAT_SPIRV, true, "vulkan")
-    gDemo.claim = SDL3gpuext.claimWindowForGPUDevice(gDemo.device, gDemo.window)
+    gDemo.context = initGPUWindowContext(
+      GPUWindowConfig(
+        appId: "dev.ellipse.tests.sdl3gpuquad",
+        title: "Ellipse SDL3 GPU Quad",
+        width: windowWidth,
+        height: windowHeight,
+        windowFlags: 0,
+        shaderFormat: GPU_SHADERFORMAT_SPIRV,
+        driverName: "vulkan",
+        debugMode: true
+      )
+    )
     initializeResources(gDemo)
     return appContinue
   except CatchableError as err:
@@ -333,7 +234,7 @@ proc iterateCallback(appState: pointer): AppResult {.cdecl.} =
 
   let commandBuffer =
     try:
-      acquireGPUCommandBuffer(gDemo.device)
+      acquireGPUCommandBuffer(gDemo.context.device)
     except SDL3gpuext.Error as err:
       echo err.msg
       return appFailure
@@ -343,7 +244,7 @@ proc iterateCallback(appState: pointer): AppResult {.cdecl.} =
   var swapchainHeight: uint32
   if not waitAndAcquireGPUSwapchainTexture(
     commandBuffer,
-    raw(gDemo.window),
+    raw(gDemo.context.window),
     addr swapchainTexture,
     addr swapchainWidth,
     addr swapchainHeight
