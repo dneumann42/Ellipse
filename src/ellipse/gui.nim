@@ -3,6 +3,8 @@ import shui/widgets/buttons as shuiButtons
 import shui/widgets/inputs as shuiInputs
 import shui/widgets/statefulWidgets as shuiStateful
 import chroma
+import std/macros
+import std/strutils
 
 import ./rendering/artist2D
 
@@ -12,6 +14,11 @@ type
   GuiContext* = object
     ui*: shui.UI
 
+type
+  GuiButtonConfig = object
+    disabled = false
+    toggle: shuiButtons.ButtonToggleState
+
 var gActiveArtist {.threadvar.}: ptr Artist2D
 
 template activeArtist: untyped =
@@ -19,6 +26,19 @@ template activeArtist: untyped =
 
 proc colorToTint(color: Color): array[4, cfloat] =
   [color.r.cfloat, color.g.cfloat, color.b.cfloat, color.a.cfloat]
+
+proc extractGuiButtonConfig(node: NimNode): tuple[config: GuiButtonConfig, toggleExpr: NimNode] =
+  result.config = GuiButtonConfig()
+  result.toggleExpr = nil
+  for child in node.items:
+    if child.kind == nnkAsgn:
+      if child[0].repr == "disabled":
+        result.config.disabled = child[1].repr == "true"
+      if child[0].repr == "toggle":
+        if child[1].kind in {nnkIdent, nnkSym}:
+          result.config.toggle = parseEnum[shuiButtons.ButtonToggleState](child[1].repr)
+        else:
+          result.toggleExpr = child[1]
 
 proc measureGuiText(text: string): tuple[w, h: int] =
   var lines = 1
@@ -150,9 +170,7 @@ proc appendTextInput*(gui: var GuiContext; text: string) =
   gui.ui.input.textInput.add(text)
 
 proc setActionButton*(gui: var GuiContext; down: bool) =
-  if down and not gui.ui.input.actionDown:
-    gui.ui.input.actionPressed = true
-  gui.ui.input.actionDown = down
+  gui.ui.setActionButtonState(down)
 
 proc setDragButton*(gui: var GuiContext; down: bool) =
   if down and not gui.ui.input.dragDown:
@@ -266,9 +284,59 @@ template label*(caption: string) =
     )
     size = (w: FitSize, h: FitSize)
 
-template button*(text: string; id: ElemId; body: untyped) =
-  shuiButtons.button(text, id):
-    body
+macro button*(text: string; id: ElemId; body: untyped): untyped =
+  let (config, toggleExpr) = extractGuiButtonConfig(body)
+  var onClick = nnkStmtList.newTree()
+
+  for i in 0 ..< body.len:
+    if body[i].kind == nnkCall and body[i][0].repr == "onClick":
+      let fn = body[i][1]
+      body[i] = nnkStmtList.newTree()
+      onClick = quote:
+        if `id`.clicked(ui):
+          `fn`
+
+  let toggleCheck =
+    if toggleExpr != nil:
+      quote do:
+        `toggleExpr` == shuiButtons.On
+    else:
+      quote do:
+        `config`.toggle == shuiButtons.On
+
+  result = quote do:
+    let config = `config`
+    ui.registerWidget(`id`)
+    `onClick`
+    block:
+      var bgCol =
+        if `id`.hot(ui) or `toggleCheck`:
+          color(0.35, 0.34, 0.7)
+        else:
+          color(0.1, 0.1, 0.3)
+      var fgCol = color(1.0)
+      if `id`.down(ui):
+        bgCol = color(0.6, 0.5, 0.9)
+      if config.disabled:
+        bgCol = color(0.1, 0.1, 0.2)
+        fgCol = color(0.7)
+      shui.elem:
+        id = `id`
+        style = Style(
+          fg: fgCol,
+          bg: bgCol,
+          borderColor: color(0.6, 0.6, 0.6),
+          border: 1,
+          padding: 4,
+          borderRadius: 8.0,
+        )
+        size = (w: Fit, h: Fit)
+        dir = Row
+        align = Center
+        crossAlign = Center
+        shui.elem:
+          text = `text`
+          style = Style(fg: fgCol, bg: color(0.0, 0.0, 0.0, 0.0))
 
 template textInput*(value: var string; id: ElemId; body: untyped) =
   shuiInputs.lineInput(value, id):
