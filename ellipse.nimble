@@ -12,6 +12,7 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.8"
+requires "shui >= 0.1.0"
 
 task test, "Run automated tests":
   exec "nim c -r tests/test1.nim"
@@ -20,8 +21,8 @@ task test_sdl3_demo, "Run the manual SDL3 callback hello-world demo test":
   exec "nim c -r tests/t_sdl3_hello.nim"
 
 task build_gpu_shaders, "Compile Vulkan SPIR-V shaders for the SDL3 GPU demo":
-  createDir("src/ellipse/rendering/shaders")
-  createDir("tests/assets/gpu")
+  exec "mkdir -p src/ellipse/rendering/shaders"
+  exec "mkdir -p tests/assets/gpu"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/primitives.vert.spv src/ellipse/rendering/shaders/primitives.vert"
   exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/primitives.frag.spv src/ellipse/rendering/shaders/primitives.frag"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/sprites.vert.spv src/ellipse/rendering/shaders/sprites.vert"
@@ -32,8 +33,8 @@ task build_gpu_shaders, "Compile Vulkan SPIR-V shaders for the SDL3 GPU demo":
   exec "glslangValidator -V -S frag -o tests/assets/gpu/sprites.frag.spv tests/assets/gpu/sprites.frag"
 
 task test_sdl3_gpu_demo, "Run the manual SDL3 GPU quad demo":
-  createDir("src/ellipse/rendering/shaders")
-  createDir("tests/assets/gpu")
+  exec "mkdir -p src/ellipse/rendering/shaders"
+  exec "mkdir -p tests/assets/gpu"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/primitives.vert.spv src/ellipse/rendering/shaders/primitives.vert"
   exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/primitives.frag.spv src/ellipse/rendering/shaders/primitives.frag"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/sprites.vert.spv src/ellipse/rendering/shaders/sprites.vert"
@@ -45,7 +46,7 @@ task test_sdl3_gpu_demo, "Run the manual SDL3 GPU quad demo":
   exec "nim c -r tests/t_sdl3_gpu_quad.nim"
 
 task test_sdl3_primitives_demo, "Run the manual SDL3 primitive drawing demo":
-  createDir("src/ellipse/rendering/shaders")
+  exec "mkdir -p src/ellipse/rendering/shaders"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/primitives.vert.spv src/ellipse/rendering/shaders/primitives.vert"
   exec "glslangValidator -V -S frag -o src/ellipse/rendering/shaders/primitives.frag.spv src/ellipse/rendering/shaders/primitives.frag"
   exec "glslangValidator -V -S vert -o src/ellipse/rendering/shaders/sprites.vert.spv src/ellipse/rendering/shaders/sprites.vert"

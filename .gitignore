@@ -7,6 +7,7 @@
 # Local Codex state.
 .codex
 .codex/
+vendor/
 
 # Common binary artifacts.
 *.a
@@ -18,3 +19,6 @@
 *.obj
 *.out
 *.so
+nimble.develop
+nimble.paths
+nimbledeps
