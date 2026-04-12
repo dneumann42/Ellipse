@@ -3,9 +3,9 @@ import ../plugins
 import ./SDL3
 import ./SDL3gpu
 import ./SDL3gpuext
-import ../rendering/[artist2D, gpucontext]
+import ../rendering/[artist2D, canvases, gpucontext]
 
-export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, artist2D, gpucontext
+export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, artist2D, canvases, gpucontext
 
 {.push raises: [].}
 
@@ -13,6 +13,11 @@ const
   appOverlaySpriteBudget = 256
 
 type
+  KeyDownMessage* = object
+    keycode*: Keycode
+    scancode*: Scancode
+    repeat*: bool
+
   AppConfig* = object
     appId*: string
     title*: string
@@ -36,6 +41,7 @@ type
     state*: T
     context*: GPUWindowContext
     artist*: Artist2D
+    canvasManager*: CanvasManager
     fpsText: string
     fps*: cfloat
     lastCounter: uint64
@@ -115,6 +121,18 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       return appFailure
 
     try:
+      let artistConfig = Artist2DConfig(
+        maxSprites:
+          if gApplication.config.maxSprites > 0:
+            gApplication.config.maxSprites + appOverlaySpriteBudget
+          else:
+            100_000 + appOverlaySpriteBudget,
+        maxTextureSlots:
+          if gApplication.config.maxTextureSlots > 0:
+            gApplication.config.maxTextureSlots
+          else:
+            8
+      )
       gApplication.context = initGPUWindowContext(
         GPUWindowConfig(
           appId: gApplication.config.appId,
@@ -139,19 +157,9 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       gApplication.artist = initArtist2D(
         gApplication.context.device,
         getGPUSwapchainTextureFormat(gApplication.context.claim),
-        Artist2DConfig(
-          maxSprites:
-            if gApplication.config.maxSprites > 0:
-              gApplication.config.maxSprites + appOverlaySpriteBudget
-            else:
-              100_000 + appOverlaySpriteBudget,
-          maxTextureSlots:
-            if gApplication.config.maxTextureSlots > 0:
-              gApplication.config.maxTextureSlots
-            else:
-              8
-        )
+        artistConfig
       )
+      gApplication.canvasManager = initCanvasManager(gApplication.context.device, artistConfig)
       gApplication.lastCounter = getPerformanceCounter()
       gApplication.fpsText = "FPS: --"
     except SDL3gpuext.Error as err:
@@ -172,7 +180,9 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       quit {.inject.} = gApplication.quitRequested
     template window: untyped {.inject, used.} = raw(gApplication.context.window)
     template device: untyped {.inject, used.} = raw(gApplication.context.device)
-    template artist: untyped {.inject, used.} = gApplication.artist
+    template canvases: untyped {.inject, used.} = gApplication.canvasManager
+    template artist: untyped {.inject, used.} =
+      currentArtistPtr(gApplication.canvasManager, addr gApplication.artist)[]
 
     withFields(gApplication.state, gApplication):
       try:
@@ -199,7 +209,9 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       quit {.inject.} = app.quitRequested
     template window: untyped {.inject, used.} = raw(app.context.window)
     template device: untyped {.inject, used.} = raw(app.context.device)
-    template artist: untyped {.inject, used.} = app.artist
+    template canvases: untyped {.inject, used.} = app.canvasManager
+    template artist: untyped {.inject, used.} =
+      currentArtistPtr(app.canvasManager, addr app.artist)[]
 
     scenes.startFrame()
     scenes.handlePushed()
@@ -255,6 +267,13 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       return if submitGPUCommandBuffer(commandBuffer): appContinue else: appFailure
 
     beginFrame(app.artist)
+    beginFrame(app.canvasManager)
+    try:
+      clearCanvases(app.canvasManager, commandBuffer)
+    except CatchableError as err:
+      reportException("application canvas clear failed", err)
+      discard cancelGPUCommandBuffer(commandBuffer)
+      return appFailure
 
     block:
       var
@@ -264,27 +283,15 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         quit {.inject.} = app.quitRequested
       template window: untyped {.inject, used.} = raw(app.context.window)
       template device: untyped {.inject, used.} = raw(app.context.device)
-      template artist: untyped {.inject, used.} = app.artist
+      template canvases: untyped {.inject, used.} = app.canvasManager
+      template artist: untyped {.inject, used.} =
+        currentArtistPtr(app.canvasManager, addr app.artist)[]
       template swapchainWidth: untyped {.inject, used.} = swapchainWidth
       template swapchainHeight: untyped {.inject, used.} = swapchainHeight
 
       withFields(app.state, app):
         try:
           generatePluginStep(draw)
-          discard drawText(
-            app.artist,
-            app.fpsText,
-            [14'f32, 14'f32],
-            [0'f32, 0'f32, 0'f32, 0.9'f32],
-            2'f32
-          )
-          discard drawText(
-            app.artist,
-            app.fpsText,
-            [12'f32, 12'f32],
-            [1'f32, 0.95'f32, 0.35'f32, 1'f32],
-            2'f32
-          )
         except CatchableError as err:
           reportException("application draw failed", err)
           discard cancelGPUCommandBuffer(commandBuffer)
@@ -296,6 +303,23 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       app.quitRequested = quit
 
     try:
+      sortForRendering(app.canvasManager)
+      renderCanvases(app.canvasManager, commandBuffer)
+      composeCanvases(app.canvasManager, app.artist, swapchainWidth, swapchainHeight)
+      discard drawText(
+        app.artist,
+        app.fpsText,
+        [14'f32, 14'f32],
+        [0'f32, 0'f32, 0'f32, 0.9'f32],
+        2'f32
+      )
+      discard drawText(
+        app.artist,
+        app.fpsText,
+        [12'f32, 12'f32],
+        [1'f32, 0.95'f32, 0.35'f32, 1'f32],
+        2'f32
+      )
       render(
         app.artist,
         commandBuffer,
@@ -325,6 +349,13 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED:
       app.quitRequested = true
       appSuccess
+    of EVENT_KEY_DOWN:
+      app.messages.send(KeyDownMessage(
+        keycode: event[].key.key,
+        scancode: event[].key.scancode,
+        repeat: event[].key.repeat
+      ))
+      appContinue
     else:
       appContinue
 

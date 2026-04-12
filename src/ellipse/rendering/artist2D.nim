@@ -1,4 +1,4 @@
-import std/[math, os, strutils]
+import std/[math, os, strutils, tables]
 
 import ../platform/SDL3
 import ../platform/SDL3gpu
@@ -9,6 +9,14 @@ type
   Artist2DError* = object of CatchableError
 
   SpriteTexture* = ptr GPUTexture
+
+  TextureFilterMode* = enum
+    tfLinear,
+    tfNearest
+
+  RenderTargetLoadOp* = enum
+    renderTargetLoad,
+    renderTargetClear
 
   SpriteTextureRegion* = object
     u0*, v0*, u1*, v1*: cfloat
@@ -21,6 +29,8 @@ type
     rotation*: cfloat
     tint*: array[4, cfloat]
     texture*: SpriteTexture
+    filterMode*: TextureFilterMode
+    hasFilterOverride*: bool
     region*: SpriteTextureRegion
     hasRegion*: bool
 
@@ -42,14 +52,16 @@ type
     instanceTransferBuffer*: GPUTransferBufferHandle
     whiteTexture*: GPUTextureHandle
     fontTexture*: GPUTextureHandle
-    sampler*: GPUSamplerHandle
+    linearSampler*: GPUSamplerHandle
+    nearestSampler*: GPUSamplerHandle
     maxSprites*: int
     maxTextureSlots*: int
     instances: seq[SpriteInstance]
     batches: seq[SpriteBatch]
     currentBatchStart: int
     currentBatchCount: int
-    currentTextures: seq[ptr GPUTexture]
+    currentBindings: seq[TextureBinding]
+    textureFilters: Table[ptr GPUTexture, TextureFilterMode]
 
   QuadVertex = object
     localPosition: array[2, cfloat]
@@ -69,6 +81,11 @@ type
     firstInstance: uint32
     instanceCount: uint32
     textures: array[8, ptr GPUTexture]
+    filterModes: array[8, TextureFilterMode]
+
+  TextureBinding = object
+    texture: ptr GPUTexture
+    filterMode: TextureFilterMode
 
   Mat4 = array[16, cfloat]
 
@@ -112,6 +129,19 @@ proc defaultSamplerInfo(): GPUSamplerCreateInfo =
     props: 0
   )
 
+proc samplerInfoForFilter(
+  samplerInfo: GPUSamplerCreateInfo;
+  filterMode: TextureFilterMode
+): GPUSamplerCreateInfo =
+  result = samplerInfo
+  case filterMode
+  of tfLinear:
+    result.min_filter = gpuFilterLinear
+    result.mag_filter = gpuFilterLinear
+  of tfNearest:
+    result.min_filter = gpuFilterNearest
+    result.mag_filter = gpuFilterNearest
+
 proc initSprite2D*(): Sprite2D =
   Sprite2D(
     position: [0'f32, 0'f32],
@@ -121,6 +151,8 @@ proc initSprite2D*(): Sprite2D =
     rotation: 0,
     tint: [1'f32, 1'f32, 1'f32, 1'f32],
     texture: nil,
+    filterMode: tfLinear,
+    hasFilterOverride: false,
     region: SpriteTextureRegion(u0: 0, v0: 0, u1: 1, v1: 1),
     hasRegion: false
   )
@@ -262,6 +294,15 @@ proc createFontTexture(device: GPUDeviceHandle): GPUTextureHandle =
     "artist2d font texture"
   )
 
+proc registerTextureFilter(
+  artist: var Artist2D;
+  texture: ptr GPUTexture;
+  filterMode: TextureFilterMode
+) =
+  if texture.isNil:
+    return
+  artist.textureFilters[texture] = filterMode
+
 proc finalizeBatch(artist: var Artist2D) =
   if artist.currentBatchCount <= 0:
     return
@@ -271,31 +312,49 @@ proc finalizeBatch(artist: var Artist2D) =
     instanceCount: uint32(artist.currentBatchCount)
   )
   for i in 0 ..< artist.maxTextureSlots:
-    batch.textures[i] =
-      if i < artist.currentTextures.len: artist.currentTextures[i]
-      else: raw(artist.whiteTexture)
+    if i < artist.currentBindings.len:
+      batch.textures[i] = artist.currentBindings[i].texture
+      batch.filterModes[i] = artist.currentBindings[i].filterMode
+    else:
+      batch.textures[i] = raw(artist.whiteTexture)
+      batch.filterModes[i] = tfLinear
   artist.batches.add(batch)
   artist.currentBatchStart = artist.instances.len
   artist.currentBatchCount = 0
-  artist.currentTextures.setLen(0)
+  artist.currentBindings.setLen(0)
 
-proc textureSlot(artist: var Artist2D; texture: ptr GPUTexture): int =
-  let resolvedTexture =
-    if texture.isNil: raw(artist.whiteTexture)
-    else: texture
+proc textureFilter(artist: Artist2D; texture: ptr GPUTexture): TextureFilterMode =
+  if texture.isNil:
+    return tfLinear
+  if artist.textureFilters.hasKey(texture):
+    return artist.textureFilters[texture]
+  tfLinear
 
-  for i, entry in artist.currentTextures:
-    if entry == resolvedTexture:
+proc textureSlot(
+  artist: var Artist2D;
+  texture: ptr GPUTexture;
+  filterMode: TextureFilterMode
+): int =
+  let resolvedBinding =
+    TextureBinding(
+      texture:
+        if texture.isNil: raw(artist.whiteTexture)
+        else: texture,
+      filterMode: filterMode
+    )
+
+  for i, entry in artist.currentBindings:
+    if entry == resolvedBinding:
       return i
 
-  if artist.currentTextures.len >= artist.maxTextureSlots:
+  if artist.currentBindings.len >= artist.maxTextureSlots:
     artist.finalizeBatch()
-  for i, entry in artist.currentTextures:
-    if entry == resolvedTexture:
+  for i, entry in artist.currentBindings:
+    if entry == resolvedBinding:
       return i
 
-  artist.currentTextures.add(resolvedTexture)
-  artist.currentTextures.len - 1
+  artist.currentBindings.add(resolvedBinding)
+  artist.currentBindings.len - 1
 
 proc createWhiteTexture(device: GPUDeviceHandle): GPUTextureHandle =
   let textureInfo = GPUTextureCreateInfo(
@@ -312,6 +371,27 @@ proc createWhiteTexture(device: GPUDeviceHandle): GPUTextureHandle =
   result = createGPUTexture(device, textureInfo)
   let pixels = [255'u8, 255'u8, 255'u8, 255'u8]
   uploadTexture2DData(device, result, 1, 1, pixels, "artist2d white texture")
+
+proc createRenderTargetTexture*(
+  device: GPUDeviceHandle;
+  width: int;
+  height: int
+): GPUTextureHandle =
+  if width <= 0 or height <= 0:
+    raise newException(Artist2DError, "Render target texture dimensions must be positive")
+
+  let textureInfo = GPUTextureCreateInfo(
+    `type`: gpuTextureType2D,
+    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+    usage: GPU_TEXTUREUSAGE_SAMPLER or GPU_TEXTUREUSAGE_COLOR_TARGET,
+    width: uint32(width),
+    height: uint32(height),
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: gpuSampleCount1,
+    props: 0
+  )
+  createGPUTexture(device, textureInfo)
 
 proc createPipeline(artist: var Artist2D; swapchainFormat: GPUTextureFormat) =
   var vertexBufferDescriptions = [
@@ -419,7 +499,8 @@ proc initArtist2D*(
   )
   result.instances = newSeqOfCap[SpriteInstance](result.maxSprites)
   result.batches = newSeqOfCap[SpriteBatch](max(1, result.maxSprites div 256))
-  result.currentTextures = newSeqOfCap[ptr GPUTexture](result.maxTextureSlots)
+  result.currentBindings = newSeqOfCap[TextureBinding](result.maxTextureSlots)
+  result.textureFilters = initTable[ptr GPUTexture, TextureFilterMode]()
 
   result.vertexShader = createShaderFromFile(
     device,
@@ -466,10 +547,12 @@ proc initArtist2D*(
 
   result.whiteTexture = createWhiteTexture(device)
   result.fontTexture = createFontTexture(device)
-  result.sampler = createGPUSampler(
-    device,
+  let samplerInfo =
     if config.samplerInfo == default(GPUSamplerCreateInfo): defaultSamplerInfo() else: config.samplerInfo
-  )
+  result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfLinear))
+  result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfNearest))
+  result.registerTextureFilter(raw(result.whiteTexture), tfLinear)
+  result.registerTextureFilter(raw(result.fontTexture), tfLinear)
 
   let quad = quadVertices()
   uploadBufferData(
@@ -494,7 +577,7 @@ proc initArtist2D*(
 proc beginFrame*(artist: var Artist2D) =
   artist.instances.setLen(0)
   artist.batches.setLen(0)
-  artist.currentTextures.setLen(0)
+  artist.currentBindings.setLen(0)
   artist.currentBatchStart = 0
   artist.currentBatchCount = 0
 
@@ -502,7 +585,10 @@ proc drawSprite*(artist: var Artist2D; sprite: Sprite2D): bool =
   if artist.instances.len >= artist.maxSprites:
     return false
 
-  let slot = artist.textureSlot(sprite.texture)
+  let filterMode =
+    if sprite.hasFilterOverride: sprite.filterMode
+    else: artist.textureFilter(sprite.texture)
+  let slot = artist.textureSlot(sprite.texture, filterMode)
   let region =
     if sprite.hasRegion: sprite.region
     else: fullRegion()
@@ -591,7 +677,8 @@ proc render*(
   targetTexture: ptr GPUTexture,
   targetWidth: uint32,
   targetHeight: uint32,
-  clearColor: FColor = FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0)
+  clearColor: FColor = FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0),
+  loadOp: RenderTargetLoadOp = renderTargetClear
 ) =
   artist.finalizeBatch()
   artist.uploadInstances(commandBuffer)
@@ -609,7 +696,11 @@ proc render*(
     mip_level: 0,
     layer_or_depth_plane: 0,
     clear_color: clearColor,
-    load_op: gpuLoadOpClear,
+    load_op:
+      if loadOp == renderTargetClear:
+        gpuLoadOpClear
+      else:
+        gpuLoadOpLoad,
     store_op: gpuStoreOpStore,
     resolve_texture: nil,
     resolve_mip_level: 0,
@@ -638,7 +729,11 @@ proc render*(
     for i in 0 ..< maxShaderTextureSlots:
       samplers[i] = GPUTextureSamplerBinding(
         texture: batch.textures[i],
-        sampler: raw(artist.sampler)
+        sampler:
+          if batch.filterModes[i] == tfNearest:
+            raw(artist.nearestSampler)
+          else:
+            raw(artist.linearSampler)
       )
     bindGPUFragmentSamplers(renderPass, 0, addr samplers[0], uint32(samplers.len))
     drawGPUIndexedPrimitives(
@@ -656,10 +751,11 @@ proc whiteSpriteTexture*(artist: Artist2D): SpriteTexture =
   raw(artist.whiteTexture)
 
 proc createSpriteTexture*(
-  artist: Artist2D;
+  artist: var Artist2D;
   width: int;
   height: int;
-  pixels: openArray[uint8]
+  pixels: openArray[uint8];
+  filterMode: TextureFilterMode = tfLinear
 ): GPUTextureHandle =
   if width <= 0 or height <= 0:
     raise newException(Artist2DError, "Sprite texture dimensions must be positive")
@@ -679,3 +775,4 @@ proc createSpriteTexture*(
   )
   result = createGPUTexture(artist.device, textureInfo)
   uploadTexture2DData(artist.device, result, width, height, pixels, "artist2d texture upload")
+  artist.registerTextureFilter(raw(result), filterMode)

@@ -27,13 +27,24 @@ type
     texture7: GPUTextureHandle
     motions: seq[SpriteMotion]
     frameIndex: uint64
+    canvasScaleMode: CanvasScaleMode
 
 const
   windowWidth = 1280
   windowHeight = 720
   textureSize = 256
-  spriteCount = 50_000
+  spriteCount = 10_000
   pi32 = PI.cfloat
+  sceneCanvasId = "scene"
+  overlayCanvasId = "overlay"
+  sceneCanvasWidth = 320
+  sceneCanvasHeight = 180
+
+proc scaleModeName(scaleMode: CanvasScaleMode): string =
+  case scaleMode
+  of csmContain: "contain"
+  of csmStretch: "stretch"
+  of csmInteger: "integer"
 
 proc wrap(value, extent: cfloat): cfloat =
   if extent <= 0:
@@ -194,7 +205,8 @@ proc texturePointer(
 
 plugin Demo:
   proc load(
-    artist: Artist2D;
+    artist: var Artist2D;
+    canvases: var CanvasManager;
     atlasTexture: var GPUTextureHandle;
     texture1: var GPUTextureHandle;
     texture2: var GPUTextureHandle;
@@ -205,18 +217,61 @@ plugin Demo:
     texture7: var GPUTextureHandle;
     motions: var seq[SpriteMotion]
   ) =
-    atlasTexture = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 0))
-    texture1 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 1))
-    texture2 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 2))
-    texture3 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 3))
-    texture4 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 4))
-    texture5 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 5))
-    texture6 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 6))
-    texture7 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 7))
+    atlasTexture = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 0), tfNearest)
+    texture1 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 1), tfNearest)
+    texture2 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 2), tfNearest)
+    texture3 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 3), tfNearest)
+    texture4 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 4), tfNearest)
+    texture5 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 5), tfNearest)
+    texture6 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 6), tfNearest)
+    texture7 = createSpriteTexture(artist, textureSize, textureSize, makePatternPixels(textureSize, 7), tfNearest)
     motions = buildMotions(spriteCount)
+    canvases.registerCanvas(RenderCanvasConfig(
+      id: sceneCanvasId,
+      width: sceneCanvasWidth,
+      height: sceneCanvasHeight,
+      scaleMode: csmContain,
+      filterMode: tfNearest,
+      layer: 0,
+      clearColor: FColor(r: 0.02, g: 0.02, b: 0.03, a: 0.0)
+    ))
+    canvases.registerCanvas(RenderCanvasConfig(
+      id: overlayCanvasId,
+      width: windowWidth,
+      height: windowHeight,
+      scaleMode: csmStretch,
+      filterMode: tfNearest,
+      layer: 10,
+      clearColor: FColor(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+    ))
+
+  proc listen(
+    msg: KeyDownMessage;
+    messages: var PluginMessages;
+    canvases: var CanvasManager;
+    canvasScaleMode: var CanvasScaleMode
+  ) =
+    if msg.repeat:
+      messages.handle(KeyDownMessage)
+      return
+
+    case msg.scancode.ord
+    of SCANCODE_1:
+      canvasScaleMode = csmContain
+    of SCANCODE_2:
+      canvasScaleMode = csmStretch
+    of SCANCODE_3:
+      canvasScaleMode = csmInteger
+    else:
+      messages.handle(KeyDownMessage)
+      return
+
+    canvases.setCanvasScaleMode(sceneCanvasId, canvasScaleMode)
+    messages.handle(KeyDownMessage)
 
   proc draw(
     artist: var Artist2D;
+    canvases: var CanvasManager;
     atlasTexture: GPUTextureHandle;
     texture1: GPUTextureHandle;
     texture2: GPUTextureHandle;
@@ -227,6 +282,7 @@ plugin Demo:
     texture7: GPUTextureHandle;
     motions: seq[SpriteMotion];
     frameIndex: var uint64;
+    canvasScaleMode: CanvasScaleMode;
     swapchainWidth: uint32;
     swapchainHeight: uint32
   ) =
@@ -235,35 +291,52 @@ plugin Demo:
     let widthf = max(1'u32, swapchainWidth).cfloat
     let heightf = max(1'u32, swapchainHeight).cfloat
 
-    for motion in motions:
-      var sprite = initSprite2D()
-      let scalePulse = motion.baseScale + motion.scaleAmplitude * sin(time * motion.scaleSpeed + motion.rotationOffset)
-      sprite.position = [
-        wrap(motion.basePosition[0] + motion.velocity[0] * time, widthf + 240'f32) - 120'f32,
-        wrap(motion.basePosition[1] + motion.velocity[1] * time, heightf + 240'f32) - 120'f32
-      ]
-      sprite.size = motion.size
-      sprite.scale = [scalePulse, scalePulse]
-      sprite.origin = [0.5'f32, 0.5'f32]
-      sprite.rotation = motion.rotationOffset + time * motion.rotationSpeed
-      sprite.tint = motion.tint
-      sprite.texture = texturePointer(
-        atlasTexture,
-        texture1,
-        texture2,
-        texture3,
-        texture4,
-        texture5,
-        texture6,
-        texture7,
-        motion.textureKind
+    withCanvas(canvases, artist, overlayCanvasId):
+      discard drawText(
+        artist,
+        "1 contain  2 stretch  3 integer",
+        [22'f32, 22'f32],
+        [0.92'f32, 0.94'f32, 0.98'f32, 1'f32],
+        2'f32
       )
-      if motion.textureKind == 0:
-        sprite.region = atlasRegion(motion.regionIndex)
-        sprite.hasRegion = true
+      discard drawText(
+        artist,
+        "canvas mode: " & scaleModeName(canvasScaleMode),
+        [22'f32, 48'f32],
+        [0.95'f32, 0.78'f32, 0.28'f32, 1'f32],
+        2'f32
+      )
 
-      if not drawSprite(artist, sprite):
-        break
+    withCanvas(canvases, artist, sceneCanvasId):
+      for motion in motions:
+        var sprite = initSprite2D()
+        let scalePulse = motion.baseScale + motion.scaleAmplitude * sin(time * motion.scaleSpeed + motion.rotationOffset)
+        sprite.position = [
+          wrap(motion.basePosition[0] + motion.velocity[0] * time, widthf + 240'f32) - 120'f32,
+          wrap(motion.basePosition[1] + motion.velocity[1] * time, heightf + 240'f32) - 120'f32
+        ]
+        sprite.size = motion.size
+        sprite.scale = [scalePulse, scalePulse]
+        sprite.origin = [0.5'f32, 0.5'f32]
+        sprite.rotation = motion.rotationOffset + time * motion.rotationSpeed
+        sprite.tint = motion.tint
+        sprite.texture = texturePointer(
+          atlasTexture,
+          texture1,
+          texture2,
+          texture3,
+          texture4,
+          texture5,
+          texture6,
+          texture7,
+          motion.textureKind
+        )
+        if motion.textureKind == 0:
+          sprite.region = atlasRegion(motion.regionIndex)
+          sprite.hasRegion = true
+
+        if not drawSprite(artist, sprite):
+          break
 
 when isMainModule:
   startApplication(

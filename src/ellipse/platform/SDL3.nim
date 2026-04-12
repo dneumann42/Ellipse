@@ -8,6 +8,13 @@ type
   PropertiesID* = uint32
   AudioFormat* = uint16
   AudioDeviceID* = uint32
+  WindowID* = uint32
+  KeyboardID* = uint32
+  Keycode* = uint32
+  Keymod* = uint16
+
+  Scancode* {.size: sizeof(cint), importc: "SDL_Scancode", header: "<SDL3/SDL_scancode.h>".} = enum
+    scancodeUnknown = 0
 
   TextureAccess* {.size: sizeof(cint), importc: "SDL_TextureAccess", header: "<SDL3/SDL_render.h>".} = enum
     textureAccessStatic = 0
@@ -40,8 +47,22 @@ type
     channels*: cint
     freq*: cint
 
+  KeyboardEvent* {.importc: "SDL_KeyboardEvent", header: "<SDL3/SDL_events.h>", bycopy.} = object
+    `type`*: EventType
+    reserved*: uint32
+    timestamp*: uint64
+    windowID*: WindowID
+    which*: KeyboardID
+    scancode*: Scancode
+    key*: Keycode
+    `mod`*: Keymod
+    raw*: uint16
+    down*: bool
+    repeat*: bool
+
   Event* {.importc: "SDL_Event", header: "<SDL3/SDL_events.h>", union, bycopy.} = object
     `type`*: EventType
+    key*: KeyboardEvent
     padding*: array[128, byte]
 
   AppInitFunc* = proc(appState: ptr pointer; argc: cint; argv: cstringArray): AppResult {.cdecl.}
@@ -56,6 +77,7 @@ const
   WINDOW_RESIZABLE* = 0x0000000000000020'u64
 
   EVENT_QUIT* = 0x00000100'u32
+  EVENT_KEY_DOWN* = 0x00000300'u32
   EVENT_WINDOW_CLOSE_REQUESTED* = 0x00000210'u32
 
   PIXELFORMAT_UNKNOWN* = 0x00000000'u32
@@ -64,6 +86,12 @@ const
   AUDIO_DEVICE_DEFAULT_PLAYBACK* = 0xFFFFFFFF'u32
   AUDIO_DEVICE_DEFAULT_RECORDING* = 0xFFFFFFFE'u32
   AUDIO_S16LE* = 0x8010'u16
+  SDLK_1* = 0x00000031'u32
+  SDLK_2* = 0x00000032'u32
+  SDLK_3* = 0x00000033'u32
+  SCANCODE_1* = 30
+  SCANCODE_2* = 31
+  SCANCODE_3* = 32
 
 proc setAppMetadata*(
   appName: cstring,

@@ -5,6 +5,8 @@ import ellipse/platform/SDL3
 import ellipse/platform/SDL3ext
 import ellipse/platform/SDL3gpu
 import ellipse/platform/SDL3gpuext
+import ellipse/rendering/artist2D
+import ellipse/rendering/canvases
 
 suite "SDL3 binding smoke tests":
   test "core constants are available":
@@ -37,6 +39,9 @@ suite "SDL3 GPU binding smoke tests":
     )
     check samplerInfo.min_filter == gpuFilterNearest
     check samplerInfo.address_mode_u == gpuSamplerAddressModeRepeat
+
+  test "texture filter enum defaults to linear":
+    check default(TextureFilterMode) == tfLinear
 
   test "gpu handle wrappers compile":
     var device: GPUDeviceHandle
@@ -94,3 +99,97 @@ suite "SDL3ext ownership":
     let wav = SDL3ext.loadWav(path)
     check wav.len == 4'u32
     check not raw(wav).isNil
+
+suite "Canvas helpers":
+  test "canvas validation rejects invalid sizes":
+    expect CanvasError:
+      validateRenderCanvasConfig(RenderCanvasConfig(
+        id: "bad",
+        width: 0,
+        height: 180,
+        destRect: Rect(x: 0, y: 0, w: 320, h: 180)
+      ))
+
+  test "default target rect uses full window when canvas rect is unset":
+    let rect = resolveCanvasTargetRect(
+      RenderCanvasConfig(id: "full", width: 320, height: 180),
+      1280'u32,
+      720'u32
+    )
+    check rect.x == 0
+    check rect.y == 0
+    check rect.w == 1280
+    check rect.h == 720
+
+  test "canvas filter defaults to linear":
+    check default(RenderCanvasConfig).filterMode == tfLinear
+
+  test "contain scaling centers inside full window by default":
+    let rect = canvasCompositeRect(RenderCanvasConfig(
+      id: "game",
+      width: 320,
+      height: 180,
+      scaleMode: csmContain
+    ), 1280'u32, 720'u32)
+    check rect.x == 0'f32
+    check rect.y == 0'f32
+    check rect.w == 1280'f32
+    check rect.h == 720'f32
+
+  test "contain scaling produces left and right bars for taller targets":
+    let rect = canvasCompositeRect(RenderCanvasConfig(
+      id: "portraitFit",
+      width: 320,
+      height: 180,
+      scaleMode: csmContain
+    ), 700'u32, 900'u32)
+    check rect.x == 0'f32
+    check rect.y == 253.125'f32
+    check rect.w == 700'f32
+    check rect.h == 393.75'f32
+
+  test "stretch scaling fills full window by default":
+    let rect = canvasCompositeRect(RenderCanvasConfig(
+      id: "hud",
+      width: 320,
+      height: 180,
+      scaleMode: csmStretch
+    ), 1280'u32, 720'u32)
+    check rect.x == 0'f32
+    check rect.y == 0'f32
+    check rect.w == 1280'f32
+    check rect.h == 720'f32
+
+  test "custom rect still overrides full-window presentation":
+    let rect = canvasCompositeRect(RenderCanvasConfig(
+      id: "custom",
+      width: 320,
+      height: 180,
+      destRect: Rect(x: 10, y: 20, w: 640, h: 360),
+      scaleMode: csmStretch
+    ), 1280'u32, 720'u32)
+    check rect.x == 10'f32
+    check rect.y == 20'f32
+    check rect.w == 640'f32
+    check rect.h == 360'f32
+
+  test "integer scaling uses whole-number upscale and centers":
+    let rect = canvasCompositeRect(RenderCanvasConfig(
+      id: "pixel",
+      width: 320,
+      height: 180,
+      scaleMode: csmInteger
+    ), 1000'u32, 700'u32)
+    check rect.x == 20'f32
+    check rect.y == 80'f32
+    check rect.w == 960'f32
+    check rect.h == 540'f32
+
+  test "layer sorting is stable for equal layers":
+    let order = sortedCanvasIndicesByLayer([
+      RenderCanvasConfig(id: "midA", width: 1, height: 1, destRect: Rect(w: 1, h: 1), layer: 2),
+      RenderCanvasConfig(id: "back", width: 1, height: 1, destRect: Rect(w: 1, h: 1), layer: 0),
+      RenderCanvasConfig(id: "midB", width: 1, height: 1, destRect: Rect(w: 1, h: 1), layer: 2),
+      RenderCanvasConfig(id: "front", width: 1, height: 1, destRect: Rect(w: 1, h: 1), layer: 5)
+    ])
+    check order == @[1, 0, 2, 3]
