@@ -1,7 +1,12 @@
+import std/os
+
 import ellipse/platform/application
 
 type
   DemoState = object
+
+const
+  demoFontPath = currentSourcePath.parentDir / "assets" / "fonts" / "Manrope-Regular.ttf"
 
 plugin Demo:
   proc load(canvases: var CanvasManager) =
@@ -36,7 +41,9 @@ when isMainModule:
       title: "Ellipse SDL3 Hello",
       width: 800,
       height: 600,
-      windowFlags: 0
+      windowFlags: 0,
+      defaultFontPath: demoFontPath,
+      defaultFontSize: 10'f32
     ),
     DemoState()
   )

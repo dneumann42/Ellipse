@@ -45,29 +45,9 @@ proc extractGuiButtonConfig(node: NimNode): tuple[config: GuiButtonConfig, toggl
           result.toggleExpr = child[1]
 
 proc measureGuiText(text: string): tuple[w, h: int] =
-  var lines = 1
-  var widest = 0
-  var current = 0
-
-  for ch in text:
-    case ch
-    of '\n':
-      if current > widest:
-        widest = current
-      current = 0
-      inc lines
-    of '\r':
-      discard
-    else:
-      inc current
-
-  if current > widest:
-    widest = current
-
-  (
-    w: widest * fontGlyphAdvance,
-    h: lines * fontGlyphHeight
-  )
+  if gActiveArtist.isNil:
+    return (w: 0, h: 0)
+  activeArtist.measureText(text)
 
 proc clamp01(value: float): float =
   if value < 0.0:

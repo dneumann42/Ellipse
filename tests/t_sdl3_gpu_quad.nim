@@ -1,4 +1,4 @@
-import std/math
+import std/[math, os]
 
 import ellipse/platform/application
 
@@ -32,6 +32,7 @@ type
 const
   windowWidth = 1280
   windowHeight = 720
+  demoFontPath = currentSourcePath.parentDir / "assets" / "fonts" / "Manrope-Regular.ttf"
   textureSize = 256
   spriteCount = 10_000
   pi32 = PI.cfloat
@@ -352,7 +353,9 @@ when isMainModule:
       debugMode: true,
       maxSprites: spriteCount,
       maxTextureSlots: 8,
-      clearColor: FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0)
+      clearColor: FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0),
+      defaultFontPath: demoFontPath,
+      defaultFontSize: 10'f32
     ),
     DemoState()
   )

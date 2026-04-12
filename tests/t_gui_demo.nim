@@ -1,4 +1,4 @@
-import std/options
+import std/[options, os]
 
 import ellipse/platform/application
 import ellipse/gui
@@ -10,6 +10,7 @@ proc accentName(index: int): string =
   else: "gold"
 
 const
+  demoFontPath = currentSourcePath.parentDir / "assets" / "fonts" / "Manrope-Regular.ttf"
   themeOptions = ["gold", "amber", "cyan", "mint"]
   stationList = [
     "Bridge",
@@ -185,7 +186,9 @@ when isMainModule:
       shaderFormat: GPU_SHADERFORMAT_SPIRV,
       driverName: "vulkan",
       debugMode: true,
-      clearColor: FColor(r: 0.05, g: 0.07, b: 0.11, a: 1.0)
+      clearColor: FColor(r: 0.05, g: 0.07, b: 0.11, a: 1.0),
+      defaultFontPath: demoFontPath,
+      defaultFontSize: 10'f32
     ),
     DemoState()
   )

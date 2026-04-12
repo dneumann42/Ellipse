@@ -1,4 +1,4 @@
-import std/math
+import std/[math, os]
 
 import ellipse/platform/application
 
@@ -10,6 +10,7 @@ type
 const
   windowWidth = 1280
   windowHeight = 720
+  demoFontPath = currentSourcePath.parentDir / "assets" / "fonts" / "Manrope-Regular.ttf"
   sceneCanvasId = "scene"
   scene2xCanvasId = "scene2x"
   scene4xCanvasId = "scene4x"
@@ -225,7 +226,9 @@ when isMainModule:
       shaderFormat: GPU_SHADERFORMAT_SPIRV,
       driverName: "vulkan",
       debugMode: true,
-      clearColor: FColor(r: 0.04, g: 0.06, b: 0.09, a: 1.0)
+      clearColor: FColor(r: 0.04, g: 0.06, b: 0.09, a: 1.0),
+      defaultFontPath: demoFontPath,
+      defaultFontSize: 10'f32
     ),
     DemoState(supersampleScale: 2)
   )

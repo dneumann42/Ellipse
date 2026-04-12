@@ -1,8 +1,9 @@
-import std/[math, os, strutils, tables]
+import std/[math, os, tables]
 
 import ../platform/SDL3
 import ../platform/SDL3gpu
 import ../platform/SDL3gpuext
+import ../platform/SDL3ttfext
 import ./[gpupipelines, gpushaders, gpuuploads]
 
 type
@@ -40,6 +41,8 @@ type
     vertexShaderPath*: string
     fragmentShaderPath*: string
     samplerInfo*: GPUSamplerCreateInfo
+    defaultFontPath*: string
+    defaultFontSize*: cfloat
 
   Artist2D* = object
     device*: GPUDeviceHandle
@@ -58,9 +61,12 @@ type
     primitiveVertexTransferBuffer*: GPUTransferBufferHandle
     primitiveIndexTransferBuffer*: GPUTransferBufferHandle
     whiteTexture*: GPUTextureHandle
-    fontTexture*: GPUTextureHandle
     linearSampler*: GPUSamplerHandle
     nearestSampler*: GPUSamplerHandle
+    defaultFontPath*: string
+    defaultFontSize*: cfloat
+    font*: TTFFontHandle
+    currentFontSize: int
     maxSprites*: int
     maxTextureSlots*: int
     maxPrimitiveVertices*: int
@@ -78,6 +84,9 @@ type
     currentBindings: seq[TextureBinding]
     currentDrawMode: DrawMode
     textureFilters: Table[ptr GPUTexture, TextureFilterMode]
+    textCache: Table[(int, string), int]
+    cachedTextEntries: seq[CachedTextEntry]
+    cachedTextTextures: seq[ptr GPUTexture]
 
   QuadVertex = object
     localPosition: array[2, cfloat]
@@ -122,18 +131,16 @@ type
 
   Mat4 = array[16, cfloat]
 
+  CachedTextEntry = object
+    key: (int, string)
+    texture: ptr GPUTexture
+    width: int
+    height: int
+
 const
   maxShaderTextureSlots = 8
   shaderDir = currentSourcePath.parentDir / "shaders"
-  firstPrintableAscii = 32
-  lastPrintableAscii = 126
-  fontGlyphWidth* = 8
-  fontGlyphHeight* = 8
-  fontGlyphAdvance* = 8
-  fontAtlasColumns = 16
-  fontAtlasRows = 6
-  fontAtlasWidth = fontAtlasColumns * fontGlyphWidth
-  fontAtlasHeight = fontAtlasRows * fontGlyphHeight
+  defaultFontPointSize* = 10'f32
   minPrimitiveVertexCapacity = 2_048
   maxPrimitiveVertexCapacity = 65_536
   primitiveCircleMinSegments = 12
@@ -224,6 +231,14 @@ proc quadIndices(): array[6, uint16] =
 proc fullRegion(): SpriteTextureRegion =
   spriteTextureRegion(0, 0, 1, 1)
 
+proc createSpriteTexture*(
+  artist: var Artist2D;
+  width: int;
+  height: int;
+  pixels: openArray[uint8];
+  filterMode: TextureFilterMode = tfLinear
+): GPUTextureHandle {.gcsafe.}
+
 proc defaultPrimitiveVertexCapacity(maxSprites: int): int =
   let requested =
     if maxSprites <= 0:
@@ -252,118 +267,135 @@ proc primitiveCircleSegmentCount*(radius: cfloat): int =
   let estimated = int(ceil(2'f32 * PI.cfloat * radius / 10'f32))
   clamp(estimated, primitiveCircleMinSegments, primitiveCircleMaxSegments)
 
-proc glyphRows(ch: char): array[7, uint8] =
-  case ch.toUpperAscii
-  of 'A': [0b01110'u8, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
-  of 'B': [0b11110'u8, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]
-  of 'C': [0b01110'u8, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]
-  of 'D': [0b11110'u8, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110]
-  of 'E': [0b11111'u8, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111]
-  of 'F': [0b11111'u8, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000]
-  of 'G': [0b01110'u8, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110]
-  of 'H': [0b10001'u8, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
-  of 'I': [0b11111'u8, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111]
-  of 'J': [0b00001'u8, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110]
-  of 'K': [0b10001'u8, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]
-  of 'L': [0b10000'u8, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]
-  of 'M': [0b10001'u8, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]
-  of 'N': [0b10001'u8, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]
-  of 'O': [0b01110'u8, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]
-  of 'P': [0b11110'u8, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]
-  of 'Q': [0b01110'u8, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]
-  of 'R': [0b11110'u8, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]
-  of 'S': [0b01111'u8, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110]
-  of 'T': [0b11111'u8, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]
-  of 'U': [0b10001'u8, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]
-  of 'V': [0b10001'u8, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100]
-  of 'W': [0b10001'u8, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010]
-  of 'X': [0b10001'u8, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001]
-  of 'Y': [0b10001'u8, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100]
-  of 'Z': [0b11111'u8, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]
-  of '0': [0b01110'u8, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]
-  of '1': [0b00100'u8, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]
-  of '2': [0b01110'u8, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111]
-  of '3': [0b11110'u8, 0b00001, 0b00001, 0b00110, 0b00001, 0b00001, 0b11110]
-  of '4': [0b00010'u8, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]
-  of '5': [0b11111'u8, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110]
-  of '6': [0b00110'u8, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]
-  of '7': [0b11111'u8, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]
-  of '8': [0b01110'u8, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]
-  of '9': [0b01110'u8, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b11100]
-  of ':': [0b00000'u8, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000]
-  of '.': [0b00000'u8, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110]
-  of '-': [0b00000'u8, 0b00000, 0b00000, 0b01110, 0b00000, 0b00000, 0b00000]
-  of '/': [0b00001'u8, 0b00010, 0b00100, 0b01000, 0b10000, 0b00000, 0b00000]
-  of '+': [0b00000'u8, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000]
-  of '(': [0b00010'u8, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]
-  of ')': [0b01000'u8, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]
-  of '[': [0b01110'u8, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110]
-  of ']': [0b01110'u8, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110]
-  of '=': [0b00000'u8, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000]
-  of ' ': [0'u8, 0, 0, 0, 0, 0, 0]
-  else: [0b01110'u8, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100]
-
-proc atlasIndex(ch: char): int =
-  let code =
-    if ch.ord < firstPrintableAscii or ch.ord > lastPrintableAscii:
-      '?'.ord
+proc splitTextLines(text: string): seq[string] =
+  result = @[""]
+  for ch in text:
+    case ch
+    of '\n':
+      result.add("")
+    of '\r':
+      discard
     else:
-      ch.ord
-  code - firstPrintableAscii
+      result[^1].add(ch)
 
-proc fontRegion(ch: char): SpriteTextureRegion =
-  let index = atlasIndex(ch)
-  let column = index mod fontAtlasColumns
-  let row = index div fontAtlasColumns
-  spriteTextureRegion(
-    cfloat(column * fontGlyphWidth) / cfloat(fontAtlasWidth),
-    cfloat(row * fontGlyphHeight) / cfloat(fontAtlasHeight),
-    cfloat((column + 1) * fontGlyphWidth) / cfloat(fontAtlasWidth),
-    cfloat((row + 1) * fontGlyphHeight) / cfloat(fontAtlasHeight)
-  )
+proc fontPixelSize(artist: Artist2D; scale: cfloat): int =
+  max(1, int(round(max(scale, 0.01'f32) * artist.defaultFontSize)))
 
-proc createFontTexture(device: GPUDeviceHandle): GPUTextureHandle =
-  var pixels = newSeq[uint8](fontAtlasWidth * fontAtlasHeight * 4)
-  for code in firstPrintableAscii .. lastPrintableAscii:
-    let index = code - firstPrintableAscii
-    let column = index mod fontAtlasColumns
-    let row = index div fontAtlasColumns
-    let baseX = column * fontGlyphWidth
-    let baseY = row * fontGlyphHeight
-    let rows = glyphRows(char(code))
-    for y in 0 ..< 7:
-      let bits = rows[y]
-      for x in 0 ..< 5:
-        if (bits and (1'u8 shl (4 - x))) == 0:
-          continue
-        let dstX = baseX + x + 1
-        let dstY = baseY + y
-        let offset = (dstY * fontAtlasWidth + dstX) * 4
-        pixels[offset + 0] = 255
-        pixels[offset + 1] = 255
-        pixels[offset + 2] = 255
-        pixels[offset + 3] = 255
+proc ensureFontSize(artist: var Artist2D; pixelSize: int) =
+  if pixelSize == artist.currentFontSize:
+    return
+  artist.font.setSize(pixelSize.cfloat)
+  artist.currentFontSize = pixelSize
 
-  let textureInfo = GPUTextureCreateInfo(
-    `type`: gpuTextureType2D,
-    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-    usage: GPU_TEXTUREUSAGE_SAMPLER,
-    width: uint32(fontAtlasWidth),
-    height: uint32(fontAtlasHeight),
-    layer_count_or_depth: 1,
-    num_levels: 1,
-    sample_count: gpuSampleCount1,
-    props: 0
+proc lineHeight(artist: var Artist2D; pixelSize: int): int =
+  artist.ensureFontSize(pixelSize)
+  max(1, artist.font.fontHeight())
+
+proc renderLineSurface(artist: var Artist2D; text: string; pixelSize: int): ptr Surface =
+  artist.ensureFontSize(pixelSize)
+  artist.font.renderTextBlended(text, Color(r: 255, g: 255, b: 255, a: 255))
+
+proc measureLine(artist: var Artist2D; text: string; pixelSize: int): tuple[w, h: int] =
+  artist.ensureFontSize(pixelSize)
+  if text.len == 0:
+    return (w: 0, h: artist.font.fontHeight())
+  artist.font.stringSize(text)
+
+proc tightSurfacePixels(surface: ptr Surface): seq[uint8] =
+  let width = int(surface.w)
+  let height = int(surface.h)
+  result = newSeq[uint8](width * height * 4)
+  if width <= 0 or height <= 0 or surface.pixels.isNil:
+    return
+
+  let srcPitch = int(surface.pitch)
+  let rowBytes = width * 4
+  let srcBase = cast[ptr UncheckedArray[uint8]](surface.pixels)
+  for y in 0 ..< height:
+    copyMem(
+      addr result[y * rowBytes],
+      cast[pointer](cast[uint](srcBase) + uint(y * srcPitch)),
+      rowBytes
+    )
+
+proc buildTextPixels(
+  artist: var Artist2D;
+  text: string;
+  pixelSize: int
+): tuple[pixels: seq[uint8], width, height: int] {.gcsafe.} =
+  let lines = splitTextLines(text)
+  let lineAdvance = artist.lineHeight(pixelSize)
+  var lineWidths = newSeq[int](lines.len)
+  var maxWidth = 0
+
+  for i, line in lines:
+    let size = artist.measureLine(line, pixelSize)
+    lineWidths[i] = size.w
+    maxWidth = max(maxWidth, size.w)
+
+  let totalWidth = max(maxWidth, 1)
+  let totalHeight = max(lineAdvance * lines.len, 1)
+  result = (pixels: newSeq[uint8](totalWidth * totalHeight * 4), width: totalWidth, height: totalHeight)
+
+  for i, line in lines:
+    if line.len == 0:
+      continue
+    let surface = artist.renderLineSurface(line, pixelSize)
+    defer:
+      destroySurface(surface)
+    let width = int(surface.w)
+    let height = int(surface.h)
+    let srcPixels = tightSurfacePixels(surface)
+    let dstY = i * lineAdvance
+    for y in 0 ..< min(height, totalHeight - dstY):
+      copyMem(
+        addr result.pixels[((dstY + y) * totalWidth) * 4],
+        unsafeAddr srcPixels[(y * width) * 4],
+        width * 4
+      )
+
+proc cacheTextTexture(
+  artist: var Artist2D;
+  text: string;
+  pixelSize: int
+): CachedTextEntry {.gcsafe.} =
+  let key = (pixelSize, text)
+  if artist.textCache.hasKey(key):
+    return artist.cachedTextEntries[artist.textCache[key]]
+
+  let rendered = artist.buildTextPixels(text, pixelSize)
+  let texture = artist.createSpriteTexture(rendered.width, rendered.height, rendered.pixels, tfLinear)
+  let entry = CachedTextEntry(
+    key: key,
+    texture: raw(texture),
+    width: rendered.width,
+    height: rendered.height
   )
-  result = createGPUTexture(device, textureInfo)
-  uploadTexture2DData(
-    device,
-    result,
-    fontAtlasWidth,
-    fontAtlasHeight,
-    pixels,
-    "artist2d font texture"
-  )
+  artist.textCache[key] = artist.cachedTextEntries.len
+  artist.cachedTextEntries.add(entry)
+  artist.cachedTextTextures.add(entry.texture)
+  entry
+
+proc measureText*(
+  artist: var Artist2D;
+  text: string;
+  scale: cfloat = 1.0
+): tuple[w, h: int] {.gcsafe.} =
+  let pixelSize = artist.fontPixelSize(scale)
+  let lines = splitTextLines(text)
+  let lineAdvance = artist.lineHeight(pixelSize)
+  var maxWidth = 0
+  for line in lines:
+    maxWidth = max(maxWidth, artist.measureLine(line, pixelSize).w)
+  (w: maxWidth, h: max(lineAdvance * lines.len, 1))
+
+proc releaseCachedTextTextures*(artist: var Artist2D) =
+  for texture in artist.cachedTextTextures:
+    if not texture.isNil:
+      releaseGPUTexture(raw(artist.device), texture)
+  artist.cachedTextTextures.setLen(0)
+  artist.cachedTextEntries.setLen(0)
+  artist.textCache.clear()
 
 proc registerTextureFilter(
   artist: var Artist2D;
@@ -630,6 +662,13 @@ proc initArtist2D*(
   result.drawCommands = newSeqOfCap[DrawCommand](max(1, result.maxSprites div 128))
   result.currentBindings = newSeqOfCap[TextureBinding](result.maxTextureSlots)
   result.textureFilters = initTable[ptr GPUTexture, TextureFilterMode]()
+  result.textCache = initTable[(int, string), int]()
+  result.cachedTextEntries = @[]
+  result.cachedTextTextures = @[]
+  result.defaultFontPath = config.defaultFontPath
+  result.defaultFontSize =
+    if config.defaultFontSize > 0: config.defaultFontSize
+    else: defaultFontPointSize
 
   result.vertexShader = createShaderFromFile(
     device,
@@ -717,13 +756,15 @@ proc initArtist2D*(
   result.primitiveIndexTransferBuffer = createGPUTransferBuffer(device, primitiveIndexTransferInfo)
 
   result.whiteTexture = createWhiteTexture(device)
-  result.fontTexture = createFontTexture(device)
+  if result.defaultFontPath.len == 0:
+    raise newException(Artist2DError, "Artist2D requires defaultFontPath for SDL3_ttf rendering")
+  result.font = openFont(result.defaultFontPath, result.defaultFontSize)
+  result.currentFontSize = int(result.defaultFontSize)
   let samplerInfo =
     if config.samplerInfo == default(GPUSamplerCreateInfo): defaultSamplerInfo() else: config.samplerInfo
   result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfLinear))
   result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfNearest))
   result.registerTextureFilter(raw(result.whiteTexture), tfLinear)
-  result.registerTextureFilter(raw(result.fontTexture), tfLinear)
 
   let quad = quadVertices()
   uploadBufferData(
@@ -1081,38 +1122,19 @@ proc drawText*(
   position: array[2, cfloat];
   tint: array[4, cfloat] = [1'f32, 1'f32, 1'f32, 1'f32];
   scale: cfloat = 1.0
-): bool =
-  if scale <= 0:
+): bool {.gcsafe.} =
+  if scale <= 0 or text.len == 0:
     return true
 
-  let lineAdvance = cfloat(fontGlyphHeight) * scale
-  let glyphAdvance = cfloat(fontGlyphAdvance) * scale
-  let glyphSize = [cfloat(fontGlyphWidth), cfloat(fontGlyphHeight)]
-  var cursor = position
-
-  for ch in text:
-    case ch
-    of '\n':
-      cursor[0] = position[0]
-      cursor[1] += lineAdvance
-      continue
-    of '\r':
-      continue
-    else:
-      var sprite = initSprite2D()
-      sprite.position = cursor
-      sprite.size = glyphSize
-      sprite.scale = [scale, scale]
-      sprite.origin = [0'f32, 0'f32]
-      sprite.tint = tint
-      sprite.texture = raw(artist.fontTexture)
-      sprite.region = fontRegion(ch)
-      sprite.hasRegion = true
-      if not artist.drawSprite(sprite):
-        return false
-      cursor[0] += glyphAdvance
-
-  true
+  let entry = artist.cacheTextTexture(text, artist.fontPixelSize(scale))
+  var sprite = initSprite2D()
+  sprite.position = position
+  sprite.size = [entry.width.cfloat, entry.height.cfloat]
+  sprite.scale = [1'f32, 1'f32]
+  sprite.origin = [0'f32, 0'f32]
+  sprite.tint = tint
+  sprite.texture = entry.texture
+  artist.drawSprite(sprite)
 
 proc uploadInstances(artist: var Artist2D; commandBuffer: ptr GPUCommandBuffer) =
   if artist.instances.len <= 0:
@@ -1294,7 +1316,7 @@ proc createSpriteTexture*(
   height: int;
   pixels: openArray[uint8];
   filterMode: TextureFilterMode = tfLinear
-): GPUTextureHandle =
+): GPUTextureHandle {.gcsafe.} =
   if width <= 0 or height <= 0:
     raise newException(Artist2DError, "Sprite texture dimensions must be positive")
   if pixels.len != width * height * 4:

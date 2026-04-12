@@ -3,6 +3,7 @@ import ../plugins
 import ./SDL3
 import ./SDL3gpu
 import ./SDL3gpuext
+import ./SDL3ttfext
 import ../gui
 import ../rendering/[artist2D, canvases, gpucontext]
 
@@ -32,6 +33,8 @@ type
     maxSprites*: int
     maxTextureSlots*: int
     clearColor*: FColor
+    defaultFontPath*: string
+    defaultFontSize*: cfloat
 
   Application*[T] = object
     config*: AppConfig
@@ -41,6 +44,7 @@ type
     quitRequested*: bool
     state*: T
     context*: GPUWindowContext
+    ttf*: TTFAppHandle
     artist*: Artist2D
     canvasManager*: CanvasManager
     gui*: GuiContext
@@ -91,6 +95,8 @@ proc reportException(context: string; err: ref CatchableError) =
 proc destroyApplication[T](app: ref Application[T]) =
   if app.isNil:
     return
+  if not raw(app.context.device).isNil:
+    app.artist.releaseCachedTextTextures()
   reset(app[])
 
 proc normalizedWindowPosition[T](
@@ -177,12 +183,32 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
           debugMode: gApplication.config.debugMode
         )
       )
+      gApplication.ttf = TTFAppHandle.init()
       gApplication.artist = initArtist2D(
         gApplication.context.device,
         getGPUSwapchainTextureFormat(gApplication.context.claim),
-        artistConfig
+        Artist2DConfig(
+          maxSprites: artistConfig.maxSprites,
+          maxTextureSlots: artistConfig.maxTextureSlots,
+          vertexShaderPath: artistConfig.vertexShaderPath,
+          fragmentShaderPath: artistConfig.fragmentShaderPath,
+          samplerInfo: artistConfig.samplerInfo,
+          defaultFontPath: gApplication.config.defaultFontPath,
+          defaultFontSize: gApplication.config.defaultFontSize
+        )
       )
-      gApplication.canvasManager = initCanvasManager(gApplication.context.device, artistConfig)
+      gApplication.canvasManager = initCanvasManager(
+        gApplication.context.device,
+        Artist2DConfig(
+          maxSprites: artistConfig.maxSprites,
+          maxTextureSlots: artistConfig.maxTextureSlots,
+          vertexShaderPath: artistConfig.vertexShaderPath,
+          fragmentShaderPath: artistConfig.fragmentShaderPath,
+          samplerInfo: artistConfig.samplerInfo,
+          defaultFontPath: gApplication.config.defaultFontPath,
+          defaultFontSize: gApplication.config.defaultFontSize
+        )
+      )
       gApplication.gui = initGuiContext()
       gApplication.lastCounter = getPerformanceCounter()
       gApplication.deltaSeconds = 1.0 / 60.0

@@ -35,7 +35,16 @@ type
   Window* {.importc: "SDL_Window", header: "<SDL3/SDL_video.h>", incompleteStruct.} = object
   Renderer* {.importc: "SDL_Renderer", header: "<SDL3/SDL_render.h>", incompleteStruct.} = object
   Texture* {.importc: "SDL_Texture", header: "<SDL3/SDL_render.h>", incompleteStruct.} = object
-  Surface* {.importc: "SDL_Surface", header: "<SDL3/SDL_surface.h>", incompleteStruct.} = object
+  SurfaceFlags* = uint32
+  Surface* {.importc: "SDL_Surface", header: "<SDL3/SDL_surface.h>", bycopy.} = object
+    flags*: SurfaceFlags
+    format*: PixelFormat
+    w*: cint
+    h*: cint
+    pitch*: cint
+    pixels*: pointer
+    refcount*: cint
+    reserved*: pointer
   IOStream* {.importc: "SDL_IOStream", header: "<SDL3/SDL_iostream.h>", incompleteStruct.} = object
   AudioStream* {.importc: "SDL_AudioStream", header: "<SDL3/SDL_audio.h>", incompleteStruct.} = object
 
