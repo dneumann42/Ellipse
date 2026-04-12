@@ -1,107 +1,269 @@
 {.passL: "-lSDL3".}
 
 type
-  SDL_InitFlags* = uint32
-  SDL_WindowFlags* = uint64
-  SDL_EventType* = uint32
+  InitFlags* = uint32
+  WindowFlags* = uint64
+  EventType* = uint32
+  PixelFormat* = uint32
+  PropertiesID* = uint32
+  AudioFormat* = uint16
+  AudioDeviceID* = uint32
 
-  SDL_AppResult* {.size: sizeof(cint), importc: "SDL_AppResult", header: "<SDL3/SDL_init.h>".} = enum
-    SDL_APP_CONTINUE = 0
-    SDL_APP_SUCCESS = 1
-    SDL_APP_FAILURE = 2
+  TextureAccess* {.size: sizeof(cint), importc: "SDL_TextureAccess", header: "<SDL3/SDL_render.h>".} = enum
+    textureAccessStatic = 0
+    textureAccessStreaming = 1
+    textureAccessTarget = 2
 
-  SDL_Window* {.importc: "SDL_Window", header: "<SDL3/SDL_video.h>", incompleteStruct.} = object
-  SDL_Renderer* {.importc: "SDL_Renderer", header: "<SDL3/SDL_render.h>", incompleteStruct.} = object
+  AppResult* {.size: sizeof(cint), importc: "SDL_AppResult", header: "<SDL3/SDL_init.h>".} = enum
+    appContinue = 0
+    appSuccess = 1
+    appFailure = 2
 
-  SDL_Event* {.importc: "SDL_Event", header: "<SDL3/SDL_events.h>", union, bycopy.} = object
-    `type`*: SDL_EventType
+  Window* {.importc: "SDL_Window", header: "<SDL3/SDL_video.h>", incompleteStruct.} = object
+  Renderer* {.importc: "SDL_Renderer", header: "<SDL3/SDL_render.h>", incompleteStruct.} = object
+  Texture* {.importc: "SDL_Texture", header: "<SDL3/SDL_render.h>", incompleteStruct.} = object
+  Surface* {.importc: "SDL_Surface", header: "<SDL3/SDL_surface.h>", incompleteStruct.} = object
+  IOStream* {.importc: "SDL_IOStream", header: "<SDL3/SDL_iostream.h>", incompleteStruct.} = object
+  AudioStream* {.importc: "SDL_AudioStream", header: "<SDL3/SDL_audio.h>", incompleteStruct.} = object
+
+  Color* {.importc: "SDL_Color", header: "<SDL3/SDL_pixels.h>", bycopy.} = object
+    r*, g*, b*, a*: uint8
+
+  Palette* {.importc: "SDL_Palette", header: "<SDL3/SDL_pixels.h>", bycopy.} = object
+    ncolors*: cint
+    colors*: ptr Color
+    version*: uint32
+    refcount*: cint
+
+  AudioSpec* {.importc: "SDL_AudioSpec", header: "<SDL3/SDL_audio.h>", bycopy.} = object
+    format*: AudioFormat
+    channels*: cint
+    freq*: cint
+
+  Event* {.importc: "SDL_Event", header: "<SDL3/SDL_events.h>", union, bycopy.} = object
+    `type`*: EventType
     padding*: array[128, byte]
 
-  SDL_AppInitFunc* = proc(appState: ptr pointer; argc: cint; argv: cstringArray): SDL_AppResult {.cdecl.}
-  SDL_AppIterateFunc* = proc(appState: pointer): SDL_AppResult {.cdecl.}
-  SDL_AppEventFunc* = proc(appState: pointer; event: ptr SDL_Event): SDL_AppResult {.cdecl.}
-  SDL_AppQuitFunc* = proc(appState: pointer; result: SDL_AppResult) {.cdecl.}
+  AppInitFunc* = proc(appState: ptr pointer; argc: cint; argv: cstringArray): AppResult {.cdecl.}
+  AppIterateFunc* = proc(appState: pointer): AppResult {.cdecl.}
+  AppEventFunc* = proc(appState: pointer; event: ptr Event): AppResult {.cdecl.}
+  AppQuitFunc* = proc(appState: pointer; result: AppResult) {.cdecl.}
 
 const
-  SDL_INIT_VIDEO* = 0x00000020'u32
+  INIT_VIDEO* = 0x00000020'u32
+  INIT_AUDIO* = 0x00000010'u32
 
-  SDL_EVENT_QUIT* = 0x00000100'u32
-  SDL_EVENT_WINDOW_CLOSE_REQUESTED* = 0x00000210'u32
+  EVENT_QUIT* = 0x00000100'u32
+  EVENT_WINDOW_CLOSE_REQUESTED* = 0x00000210'u32
 
-proc SDL_SetAppMetadata*(
+  PIXELFORMAT_UNKNOWN* = 0x00000000'u32
+  PIXELFORMAT_RGBA8888* = 0x16462004'u32
+
+  AUDIO_DEVICE_DEFAULT_PLAYBACK* = 0xFFFFFFFF'u32
+  AUDIO_DEVICE_DEFAULT_RECORDING* = 0xFFFFFFFE'u32
+  AUDIO_S16LE* = 0x8010'u16
+
+proc setAppMetadata*(
   appName: cstring,
   appVersion: cstring,
   appIdentifier: cstring
-): bool {.importc, header: "<SDL3/SDL_init.h>".}
+): bool {.importc: "SDL_SetAppMetadata", header: "<SDL3/SDL_init.h>".}
 
-proc SDL_Init*(flags: SDL_InitFlags): bool {.
+proc init*(flags: InitFlags): bool {.
   importc: "SDL_Init",
   header: "<SDL3/SDL_init.h>"
 .}
 
-proc SDL_Quit*() {.
+proc quit*() {.
   importc: "SDL_Quit",
   header: "<SDL3/SDL_init.h>"
 .}
 
-proc SDL_CreateWindow*(
+proc createWindow*(
   title: cstring,
   w: cint,
   h: cint,
-  flags: SDL_WindowFlags
-): ptr SDL_Window {.
+  flags: WindowFlags
+): ptr Window {.
   importc: "SDL_CreateWindow",
   header: "<SDL3/SDL_video.h>"
 .}
 
-proc SDL_DestroyWindow*(window: ptr SDL_Window) {.
+proc destroyWindow*(window: ptr Window) {.
   importc: "SDL_DestroyWindow",
   header: "<SDL3/SDL_video.h>"
 .}
 
-proc SDL_CreateRenderer*(
-  window: ptr SDL_Window,
+proc createRenderer*(
+  window: ptr Window,
   name: cstring
-): ptr SDL_Renderer {.
+): ptr Renderer {.
   importc: "SDL_CreateRenderer",
   header: "<SDL3/SDL_render.h>"
 .}
 
-proc SDL_DestroyRenderer*(renderer: ptr SDL_Renderer) {.
+proc destroyRenderer*(renderer: ptr Renderer) {.
   importc: "SDL_DestroyRenderer",
   header: "<SDL3/SDL_render.h>"
 .}
 
-proc SDL_SetRenderDrawColor*(
-  renderer: ptr SDL_Renderer,
+proc createTexture*(
+  renderer: ptr Renderer,
+  format: PixelFormat,
+  access: TextureAccess,
+  w: cint,
+  h: cint
+): ptr Texture {.
+  importc: "SDL_CreateTexture",
+  header: "<SDL3/SDL_render.h>"
+.}
+
+proc createTextureFromSurface*(
+  renderer: ptr Renderer,
+  surface: ptr Surface
+): ptr Texture {.
+  importc: "SDL_CreateTextureFromSurface",
+  header: "<SDL3/SDL_render.h>"
+.}
+
+proc createTextureWithProperties*(
+  renderer: ptr Renderer,
+  props: PropertiesID
+): ptr Texture {.
+  importc: "SDL_CreateTextureWithProperties",
+  header: "<SDL3/SDL_render.h>"
+.}
+
+proc destroyTexture*(texture: ptr Texture) {.
+  importc: "SDL_DestroyTexture",
+  header: "<SDL3/SDL_render.h>"
+.}
+
+proc createSurface*(
+  width: cint,
+  height: cint,
+  format: PixelFormat
+): ptr Surface {.
+  importc: "SDL_CreateSurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc destroySurface*(surface: ptr Surface) {.
+  importc: "SDL_DestroySurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc loadSurface*(file: cstring): ptr Surface {.
+  importc: "SDL_LoadSurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc loadBmp*(file: cstring): ptr Surface {.
+  importc: "SDL_LoadBMP",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc createPalette*(ncolors: cint): ptr Palette {.
+  importc: "SDL_CreatePalette",
+  header: "<SDL3/SDL_pixels.h>"
+.}
+
+proc destroyPalette*(palette: ptr Palette) {.
+  importc: "SDL_DestroyPalette",
+  header: "<SDL3/SDL_pixels.h>"
+.}
+
+proc createProperties*(): PropertiesID {.
+  importc: "SDL_CreateProperties",
+  header: "<SDL3/SDL_properties.h>"
+.}
+
+proc destroyProperties*(props: PropertiesID) {.
+  importc: "SDL_DestroyProperties",
+  header: "<SDL3/SDL_properties.h>"
+.}
+
+proc ioFromFile*(file: cstring, mode: cstring): ptr IOStream {.
+  importc: "SDL_IOFromFile",
+  header: "<SDL3/SDL_iostream.h>"
+.}
+
+proc closeIO*(context: ptr IOStream): bool {.
+  importc: "SDL_CloseIO",
+  header: "<SDL3/SDL_iostream.h>"
+.}
+
+proc openAudioDevice*(
+  devid: AudioDeviceID,
+  spec: ptr AudioSpec
+): AudioDeviceID {.
+  importc: "SDL_OpenAudioDevice",
+  header: "<SDL3/SDL_audio.h>"
+.}
+
+proc closeAudioDevice*(devid: AudioDeviceID) {.
+  importc: "SDL_CloseAudioDevice",
+  header: "<SDL3/SDL_audio.h>"
+.}
+
+proc createAudioStream*(
+  srcSpec: ptr AudioSpec,
+  dstSpec: ptr AudioSpec
+): ptr AudioStream {.
+  importc: "SDL_CreateAudioStream",
+  header: "<SDL3/SDL_audio.h>"
+.}
+
+proc destroyAudioStream*(stream: ptr AudioStream) {.
+  importc: "SDL_DestroyAudioStream",
+  header: "<SDL3/SDL_audio.h>"
+.}
+
+proc loadWav*(
+  path: cstring,
+  spec: ptr AudioSpec,
+  audioBuf: ptr ptr uint8,
+  audioLen: ptr uint32
+): bool {.
+  importc: "SDL_LoadWAV",
+  header: "<SDL3/SDL_audio.h>"
+.}
+
+proc setRenderDrawColor*(
+  renderer: ptr Renderer,
   r, g, b, a: uint8
 ): bool {.
   importc: "SDL_SetRenderDrawColor",
   header: "<SDL3/SDL_render.h>"
 .}
 
-proc SDL_RenderClear*(renderer: ptr SDL_Renderer): bool {.
+proc renderClear*(renderer: ptr Renderer): bool {.
   importc: "SDL_RenderClear",
   header: "<SDL3/SDL_render.h>"
 .}
 
-proc SDL_RenderPresent*(renderer: ptr SDL_Renderer): bool {.
+proc renderPresent*(renderer: ptr Renderer): bool {.
   importc: "SDL_RenderPresent",
   header: "<SDL3/SDL_render.h>"
 .}
 
-proc SDL_GetError*(): cstring {.
+proc getError*(): cstring {.
   importc: "SDL_GetError",
   header: "<SDL3/SDL_error.h>"
 .}
 
-proc SDL_EnterAppMainCallbacks*(
+proc free*(mem: pointer) {.
+  importc: "SDL_free",
+  header: "<SDL3/SDL_stdinc.h>"
+.}
+
+proc enterAppMainCallbacks*(
   argc: cint,
   argv: cstringArray,
-  appInit: SDL_AppInitFunc,
-  appIterate: SDL_AppIterateFunc,
-  appEvent: SDL_AppEventFunc,
-  appQuit: SDL_AppQuitFunc
+  appInit: AppInitFunc,
+  appIterate: AppIterateFunc,
+  appEvent: AppEventFunc,
+  appQuit: AppQuitFunc
 ): cint {.
   importc: "SDL_EnterAppMainCallbacks",
   header: "<SDL3/SDL_main.h>"

@@ -1,8 +1,9 @@
 import std/[macros]
 import ../plugins
 import ./SDL3
+import ./SDL3ext
 
-export macros, plugins, SDL3
+export macros, plugins, SDL3, SDL3ext
 
 {.push raises: [].}
 
@@ -12,12 +13,13 @@ type
     title*: string
     width*: int
     height*: int
-    windowFlags*: SDL_WindowFlags
+    windowFlags*: WindowFlags
 
   AppState*[T] = object
     config*: AppConfig
-    window*: ptr SDL_Window
-    renderer*: ptr SDL_Renderer
+    sdl*: AppHandle
+    window*: WindowHandle
+    renderer*: RendererHandle
     pluginStates*: PluginStates
     messages*: PluginMessages
     scenes*: SceneStack
@@ -25,7 +27,7 @@ type
     state*: T
 
 template sdlError(prefix: string): string =
-  prefix & ": " & $SDL_GetError()
+  prefix & ": " & $getError()
 
 var cstderr {.importc: "stderr", header: "<stdio.h>".}: pointer
 
@@ -66,25 +68,16 @@ proc reportException(context: string; err: ref CatchableError) =
 proc destroyAppState[T](state: ref AppState[T]) =
   if state.isNil:
     return
-
-  if not state.renderer.isNil:
-    SDL_DestroyRenderer(state.renderer)
-    state.renderer = nil
-
-  if not state.window.isNil:
-    SDL_DestroyWindow(state.window)
-    state.window = nil
-
-  SDL_Quit()
+  reset(state[])
 
 template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
   var gAppState {.global.}: ref AppState[T]
 
-  proc SDL_AppInit(
+  proc appInitCallback(
     appState: ptr pointer,
     argc: cint,
     argv: cstringArray
-  ): SDL_AppResult {.cdecl, gcsafe.} =
+  ): AppResult {.cdecl, gcsafe.} =
     discard argc
     discard argv
 
@@ -98,36 +91,28 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
 
     appState[] = cast[pointer](gAppState)
 
-    if not SDL_SetAppMetadata(
+    if not setAppMetadata(
       gAppState.config.title.cstring,
       "0.0.0",
       gAppState.config.appId.cstring
     ):
-      flushStderr(sdlError("SDL_SetAppMetadata failed"))
+      flushStderr(sdlError("setAppMetadata failed"))
       gAppState.destroyAppState()
-      return SDL_APP_FAILURE
+      return appFailure
 
-    if not SDL_Init(SDL_INIT_VIDEO):
-      flushStderr(sdlError("SDL_Init failed"))
+    try:
+      gAppState.sdl = init(INIT_VIDEO)
+      gAppState.window = createWindow(
+        gAppState.config.title,
+        gAppState.config.width,
+        gAppState.config.height,
+        gAppState.config.windowFlags
+      )
+      gAppState.renderer = createRenderer(gAppState.window)
+    except Error as err:
+      flushStderr(err.msg)
       gAppState.destroyAppState()
-      return SDL_APP_FAILURE
-
-    gAppState.window = SDL_CreateWindow(
-      gAppState.config.title.cstring,
-      cint(gAppState.config.width),
-      cint(gAppState.config.height),
-      gAppState.config.windowFlags
-    )
-    if gAppState.window.isNil:
-      flushStderr(sdlError("SDL_CreateWindow failed"))
-      gAppState.destroyAppState()
-      return SDL_APP_FAILURE
-
-    gAppState.renderer = SDL_CreateRenderer(gAppState.window, nil)
-    if gAppState.renderer.isNil:
-      flushStderr(sdlError("SDL_CreateRenderer failed"))
-      gAppState.destroyAppState()
-      return SDL_APP_FAILURE
+      return appFailure
 
     generatePluginStateInitialize(gAppState.pluginStates)
 
@@ -135,8 +120,8 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       scenes {.inject.} = gAppState.scenes
       pluginStates {.inject.} = gAppState.pluginStates
       messages {.inject.} = gAppState.messages
-      window {.inject.} = gAppState.window
-      renderer {.inject.} = gAppState.renderer
+      window {.inject.} = raw(gAppState.window)
+      renderer {.inject.} = raw(gAppState.renderer)
       quit {.inject.} = gAppState.quitRequested
 
     withFields(gAppState.state, gAppState):
@@ -145,24 +130,24 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       except CatchableError as err:
         reportException("application load failed", err)
         gAppState.destroyAppState()
-        return SDL_APP_FAILURE
+        return appFailure
 
     gAppState.scenes = scenes
     gAppState.pluginStates = pluginStates
     gAppState.messages = messages
     gAppState.quitRequested = quit
 
-    SDL_APP_CONTINUE
+    appContinue
 
-  proc SDL_AppIterate(appState: pointer): SDL_AppResult {.cdecl, gcsafe.} =
+  proc iterateCallback(appState: pointer): AppResult {.cdecl, gcsafe.} =
     let state = cast[ref AppState[T]](appState)
 
     var
       scenes {.inject.} = state.scenes
       pluginStates {.inject.} = state.pluginStates
       messages {.inject.} = state.messages
-      window {.inject.} = state.window
-      renderer {.inject.} = state.renderer
+      window {.inject.} = raw(state.window)
+      renderer {.inject.} = raw(state.renderer)
       quit {.inject.} = state.quitRequested
 
     scenes.startFrame()
@@ -176,7 +161,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         generatePluginStep(alwaysUpdate)
       except CatchableError as err:
         reportException("application update failed", err)
-        return SDL_APP_FAILURE
+        return appFailure
 
     state.scenes = scenes
     state.pluginStates = pluginStates
@@ -184,22 +169,22 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     state.quitRequested = quit
 
     if state.quitRequested:
-      return SDL_APP_SUCCESS
+      return appSuccess
 
-    if not SDL_SetRenderDrawColor(state.renderer, 0'u8, 0'u8, 0'u8, 255'u8):
-      flushStderr(sdlError("SDL_SetRenderDrawColor failed"))
-      return SDL_APP_FAILURE
+    if not setRenderDrawColor(raw(state.renderer), 0'u8, 0'u8, 0'u8, 255'u8):
+      flushStderr(sdlError("setRenderDrawColor failed"))
+      return appFailure
 
-    if not SDL_RenderClear(state.renderer):
-      flushStderr(sdlError("SDL_RenderClear failed"))
-      return SDL_APP_FAILURE
+    if not renderClear(raw(state.renderer)):
+      flushStderr(sdlError("renderClear failed"))
+      return appFailure
 
     var
       pluginStates {.inject.} = state.pluginStates
       messages {.inject.} = state.messages
       scenes {.inject.} = state.scenes
-      window {.inject.} = state.window
-      renderer {.inject.} = state.renderer
+      window {.inject.} = raw(state.window)
+      renderer {.inject.} = raw(state.renderer)
       quit {.inject.} = state.quitRequested
 
     withFields(state.state, state):
@@ -207,30 +192,30 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         generatePluginStep(draw)
       except CatchableError as err:
         reportException("application draw failed", err)
-        return SDL_APP_FAILURE
+        return appFailure
 
     state.pluginStates = pluginStates
     state.messages = messages
     state.scenes = scenes
     state.quitRequested = quit
 
-    if not SDL_RenderPresent(state.renderer):
-      flushStderr(sdlError("SDL_RenderPresent failed"))
-      return SDL_APP_FAILURE
+    if not renderPresent(raw(state.renderer)):
+      flushStderr(sdlError("renderPresent failed"))
+      return appFailure
 
-    SDL_APP_CONTINUE
+    appContinue
 
-  proc SDL_AppEvent(appState: pointer; event: ptr SDL_Event): SDL_AppResult {.cdecl, gcsafe.} =
+  proc eventCallback(appState: pointer; event: ptr Event): AppResult {.cdecl, gcsafe.} =
     let state = cast[ref AppState[T]](appState)
 
     case event[].`type`
-    of SDL_EVENT_QUIT, SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+    of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED:
       state.quitRequested = true
-      SDL_APP_SUCCESS
+      appSuccess
     else:
-      SDL_APP_CONTINUE
+      appContinue
 
-  proc SDL_AppQuit(appState: pointer; result: SDL_AppResult) {.cdecl, gcsafe.} =
+  proc quitCallback(appState: pointer; result: AppResult) {.cdecl, gcsafe.} =
     discard result
 
     let state =
@@ -242,13 +227,13 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     state.destroyAppState()
     gAppState = nil
 
-  discard SDL_EnterAppMainCallbacks(
+  discard enterAppMainCallbacks(
     0,
     nil,
-    SDL_AppInit,
-    SDL_AppIterate,
-    SDL_AppEvent,
-    SDL_AppQuit
+    appInitCallback,
+    iterateCallback,
+    eventCallback,
+    quitCallback
   )
 
 template startApplication*[T](config: AppConfig, initialState: T): untyped =

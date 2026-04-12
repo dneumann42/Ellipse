@@ -1,106 +1,85 @@
 import os
 import ellipse/platform/SDL3
+import ellipse/platform/SDL3ext
 
 type
   DemoState = object
-    window: ptr SDL_Window
-    renderer: ptr SDL_Renderer
+    sdl: AppHandle
+    window: WindowHandle
+    renderer: RendererHandle
 
-proc sdlError(prefix: string): string =
-  prefix & ": " & $SDL_GetError()
+var gState: ref DemoState
 
-proc SDL_AppInit(appState: ptr pointer; argc: cint; argv: cstringArray): SDL_AppResult {.
+proc appInitCallback(appState: ptr pointer; argc: cint; argv: cstringArray): AppResult {.
   exportc,
   cdecl
 .} =
   discard argc
   discard argv
 
-  if not SDL_SetAppMetadata("Ellipse SDL3 Hello", "0.0.0", "dev.ellipse.tests.sdl3hello"):
-    stderr.writeLine sdlError("SDL_SetAppMetadata failed")
-    return SDL_APP_FAILURE
+  if not setAppMetadata("Ellipse SDL3 Hello", "0.0.0", "dev.ellipse.tests.sdl3hello"):
+    stderr.writeLine "setAppMetadata failed: " & $getError()
+    return appFailure
 
-  if not SDL_Init(SDL_INIT_VIDEO):
-    stderr.writeLine sdlError("SDL_Init failed")
-    return SDL_APP_FAILURE
+  try:
+    new(gState)
+    gState.sdl = SDL3ext.init(INIT_VIDEO)
+    gState.window = SDL3ext.createWindow("Ellipse SDL3 Hello", 800, 600)
+    gState.renderer = SDL3ext.createRenderer(gState.window)
+  except Error as err:
+    stderr.writeLine err.msg
+    gState = nil
+    return appFailure
 
-  let state = create(DemoState)
-  state.window = SDL_CreateWindow("Ellipse SDL3 Hello", 800, 600, 0)
-  if state.window.isNil:
-    stderr.writeLine sdlError("SDL_CreateWindow failed")
-    dealloc(state)
-    SDL_Quit()
-    return SDL_APP_FAILURE
+  if not setRenderDrawColor(raw(gState.renderer), 24'u8, 34'u8, 48'u8, 255'u8):
+    stderr.writeLine "setRenderDrawColor failed: " & $getError()
+    gState = nil
+    return appFailure
 
-  state.renderer = SDL_CreateRenderer(state.window, nil)
-  if state.renderer.isNil:
-    stderr.writeLine sdlError("SDL_CreateRenderer failed")
-    SDL_DestroyWindow(state.window)
-    dealloc(state)
-    SDL_Quit()
-    return SDL_APP_FAILURE
+  if not renderClear(raw(gState.renderer)):
+    stderr.writeLine "renderClear failed: " & $getError()
+    gState = nil
+    return appFailure
 
-  if not SDL_SetRenderDrawColor(state.renderer, 24'u8, 34'u8, 48'u8, 255'u8):
-    stderr.writeLine sdlError("SDL_SetRenderDrawColor failed")
-    SDL_DestroyRenderer(state.renderer)
-    SDL_DestroyWindow(state.window)
-    dealloc(state)
-    SDL_Quit()
-    return SDL_APP_FAILURE
+  if not renderPresent(raw(gState.renderer)):
+    stderr.writeLine "renderPresent failed: " & $getError()
+    gState = nil
+    return appFailure
 
-  if not SDL_RenderClear(state.renderer):
-    stderr.writeLine sdlError("SDL_RenderClear failed")
-    SDL_DestroyRenderer(state.renderer)
-    SDL_DestroyWindow(state.window)
-    dealloc(state)
-    SDL_Quit()
-    return SDL_APP_FAILURE
+  appState[] = cast[pointer](gState)
+  appContinue
 
-  if not SDL_RenderPresent(state.renderer):
-    stderr.writeLine sdlError("SDL_RenderPresent failed")
-    SDL_DestroyRenderer(state.renderer)
-    SDL_DestroyWindow(state.window)
-    dealloc(state)
-    SDL_Quit()
-    return SDL_APP_FAILURE
+proc iterateCallback(appState: pointer): AppResult {.exportc, cdecl.} =
+  let state = cast[ref DemoState](appState)
 
-  appState[] = cast[pointer](state)
-  SDL_APP_CONTINUE
+  if not renderClear(raw(state.renderer)):
+    stderr.writeLine "renderClear failed: " & $getError()
+    return appFailure
 
-proc SDL_AppIterate(appState: pointer): SDL_AppResult {.exportc, cdecl.} =
-  let state = cast[ptr DemoState](appState)
+  if not renderPresent(raw(state.renderer)):
+    stderr.writeLine "renderPresent failed: " & $getError()
+    return appFailure
 
-  if not SDL_RenderClear(state.renderer):
-    stderr.writeLine sdlError("SDL_RenderClear failed")
-    return SDL_APP_FAILURE
+  appContinue
 
-  if not SDL_RenderPresent(state.renderer):
-    stderr.writeLine sdlError("SDL_RenderPresent failed")
-    return SDL_APP_FAILURE
-
-  SDL_APP_CONTINUE
-
-proc SDL_AppEvent(appState: pointer; event: ptr SDL_Event): SDL_AppResult {.exportc, cdecl.} =
+proc eventCallback(appState: pointer; event: ptr Event): AppResult {.exportc, cdecl.} =
   discard appState
 
   case event[].`type`
-  of SDL_EVENT_QUIT, SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-    SDL_APP_SUCCESS
+  of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED:
+    appSuccess
   else:
-    SDL_APP_CONTINUE
+    appContinue
 
-proc SDL_AppQuit(appState: pointer; result: SDL_AppResult) {.exportc, cdecl.} =
+proc quitCallback(appState: pointer; result: AppResult) {.exportc, cdecl.} =
   discard result
 
-  if not appState.isNil:
-    let state = cast[ptr DemoState](appState)
-    if not state.renderer.isNil:
-      SDL_DestroyRenderer(state.renderer)
-    if not state.window.isNil:
-      SDL_DestroyWindow(state.window)
-    dealloc(state)
-
-  SDL_Quit()
+  if appState.isNil:
+    gState = nil
+  else:
+    let state = cast[ref DemoState](appState)
+    reset(state[])
+    gState = nil
 
 when isMainModule:
   var args = newSeq[string](1 + paramCount())
@@ -112,11 +91,11 @@ when isMainModule:
   for i, value in args:
     cArgs[i] = value.cstring
 
-  quit SDL_EnterAppMainCallbacks(
+  system.quit enterAppMainCallbacks(
     cint(cArgs.len),
     cast[cstringArray](addr cArgs[0]),
-    SDL_AppInit,
-    SDL_AppIterate,
-    SDL_AppEvent,
-    SDL_AppQuit
+    appInitCallback,
+    iterateCallback,
+    eventCallback,
+    quitCallback
   )
