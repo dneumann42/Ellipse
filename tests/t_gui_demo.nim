@@ -188,7 +188,7 @@ when isMainModule:
       debugMode: true,
       clearColor: FColor(r: 0.05, g: 0.07, b: 0.11, a: 1.0),
       defaultFontPath: demoFontPath,
-      defaultFontSize: 10'f32
+      defaultFontSize: 16'f32
     ),
     DemoState()
   )

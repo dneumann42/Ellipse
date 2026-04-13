@@ -495,6 +495,11 @@ proc bindGPUGraphicsPipeline*(renderPass: ptr GPURenderPass; pipeline: ptr GPUGr
   header: "<SDL3/SDL_gpu.h>"
 .}
 
+proc setGPUScissor*(renderPass: ptr GPURenderPass; scissor: ptr Rect) {.
+  importc: "SDL_SetGPUScissor",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
 proc bindGPUVertexBuffers*(
   renderPass: ptr GPURenderPass,
   firstSlot: uint32,

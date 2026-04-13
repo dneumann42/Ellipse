@@ -13,6 +13,8 @@ export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, canvases, gpuc
 
 const
   appOverlaySpriteBudget = 256
+  defaultGuiSupersampleScale = 4
+  guiCanvasId = "__ellipse.gui"
 
 type
   KeyDownMessage* = object
@@ -209,6 +211,15 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
           defaultFontSize: gApplication.config.defaultFontSize
         )
       )
+      registerCanvas(gApplication.canvasManager, RenderCanvasConfig(
+        id: guiCanvasId,
+        width: gApplication.config.width * defaultGuiSupersampleScale,
+        height: gApplication.config.height * defaultGuiSupersampleScale,
+        scaleMode: csmStretch,
+        filterMode: tfLinear,
+        layer: high(int),
+        clearColor: FColor(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+      ))
       gApplication.gui = initGuiContext()
       gApplication.lastCounter = getPerformanceCounter()
       gApplication.deltaSeconds = 1.0 / 60.0
@@ -362,14 +373,16 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
 
     try:
       sortForRendering(app.canvasManager)
+      withCanvas(app.canvasManager, app.artist, guiCanvasId):
+        app.gui.render(
+          artist,
+          swapchainWidth.int,
+          swapchainHeight.int,
+          app.deltaSeconds,
+          defaultGuiSupersampleScale.cfloat
+        )
       renderCanvases(app.canvasManager, commandBuffer)
       composeCanvases(app.canvasManager, app.artist, swapchainWidth, swapchainHeight)
-      app.gui.render(
-        app.artist,
-        swapchainWidth.int,
-        swapchainHeight.int,
-        app.deltaSeconds
-      )
       discard drawText(
         app.artist,
         app.fpsText,

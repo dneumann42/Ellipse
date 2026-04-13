@@ -19,6 +19,9 @@ type
     renderTargetLoad,
     renderTargetClear
 
+  ScissorRect* = object
+    x*, y*, w*, h*: int
+
   SpriteTextureRegion* = object
     u0*, v0*, u1*, v1*: cfloat
 
@@ -83,6 +86,7 @@ type
     currentPrimitiveCount: int
     currentBindings: seq[TextureBinding]
     currentDrawMode: DrawMode
+    currentScissor: QueuedScissor
     textureFilters: Table[ptr GPUTexture, TextureFilterMode]
     textCache: Table[(int, string), int]
     cachedTextEntries: seq[CachedTextEntry]
@@ -124,10 +128,15 @@ type
   DrawCommand = object
     mode: DrawMode
     batchIndex: uint32
+    scissor: QueuedScissor
 
   TextureBinding = object
     texture: ptr GPUTexture
     filterMode: TextureFilterMode
+
+  QueuedScissor = object
+    enabled: bool
+    rect: ScissorRect
 
   Mat4 = array[16, cfloat]
 
@@ -139,6 +148,7 @@ type
 
 const
   maxShaderTextureSlots = 8
+  defaultFontStyleBold = 0x01'u32
   shaderDir = currentSourcePath.parentDir / "shaders"
   defaultFontPointSize* = 10'f32
   minPrimitiveVertexCapacity = 2_048
@@ -318,41 +328,113 @@ proc tightSurfacePixels(surface: ptr Surface): seq[uint8] =
       rowBytes
     )
 
+proc trimTransparentRows(
+  pixels: seq[uint8];
+  width: int;
+  height: int
+): tuple[pixels: seq[uint8], height: int] =
+  if width <= 0 or height <= 0 or pixels.len == 0:
+    return (pixels: newSeq[uint8](max(width * max(height, 1), 1) * 4), height: max(height, 1))
+
+  var top = 0
+  while top < height:
+    var opaque = false
+    let rowStart = top * width * 4
+    for x in 0 ..< width:
+      if pixels[rowStart + x * 4 + 3] != 0:
+        opaque = true
+        break
+    if opaque:
+      break
+    inc top
+
+  if top >= height:
+    return (pixels: newSeq[uint8](width * 4), height: 1)
+
+  var bottom = height - 1
+  while bottom > top:
+    var opaque = false
+    let rowStart = bottom * width * 4
+    for x in 0 ..< width:
+      if pixels[rowStart + x * 4 + 3] != 0:
+        opaque = true
+        break
+    if opaque:
+      break
+    dec bottom
+
+  let trimmedHeight = max(bottom - top + 1, 1)
+  result = (pixels: newSeq[uint8](width * trimmedHeight * 4), height: trimmedHeight)
+  copyMem(addr result.pixels[0], unsafeAddr pixels[top * width * 4], width * trimmedHeight * 4)
+
 proc buildTextPixels(
   artist: var Artist2D;
   text: string;
   pixelSize: int
 ): tuple[pixels: seq[uint8], width, height: int] {.gcsafe.} =
   let lines = splitTextLines(text)
-  let lineAdvance = artist.lineHeight(pixelSize)
+  var linePixels = newSeq[seq[uint8]](lines.len)
   var lineWidths = newSeq[int](lines.len)
+  var lineHeights = newSeq[int](lines.len)
   var maxWidth = 0
-
-  for i, line in lines:
-    let size = artist.measureLine(line, pixelSize)
-    lineWidths[i] = size.w
-    maxWidth = max(maxWidth, size.w)
-
-  let totalWidth = max(maxWidth, 1)
-  let totalHeight = max(lineAdvance * lines.len, 1)
-  result = (pixels: newSeq[uint8](totalWidth * totalHeight * 4), width: totalWidth, height: totalHeight)
+  var totalHeight = 0
 
   for i, line in lines:
     if line.len == 0:
+      linePixels[i] = @[]
+      lineWidths[i] = 0
+      lineHeights[i] = max(artist.lineHeight(pixelSize) div 2, 1)
+      totalHeight += lineHeights[i]
       continue
+
     let surface = artist.renderLineSurface(line, pixelSize)
     defer:
       destroySurface(surface)
     let width = int(surface.w)
     let height = int(surface.h)
     let srcPixels = tightSurfacePixels(surface)
-    let dstY = i * lineAdvance
-    for y in 0 ..< min(height, totalHeight - dstY):
-      copyMem(
-        addr result.pixels[((dstY + y) * totalWidth) * 4],
-        unsafeAddr srcPixels[(y * width) * 4],
-        width * 4
-      )
+    let trimmed = trimTransparentRows(srcPixels, width, height)
+    linePixels[i] = trimmed.pixels
+    lineWidths[i] = width
+    lineHeights[i] = trimmed.height
+    maxWidth = max(maxWidth, width)
+    totalHeight += trimmed.height
+
+  let totalWidth = max(maxWidth, 1)
+  let finalHeight = max(totalHeight, 1)
+  result = (pixels: newSeq[uint8](totalWidth * finalHeight * 4), width: totalWidth, height: finalHeight)
+
+  var dstY = 0
+  for i, line in lines:
+    let lineHeight = lineHeights[i]
+    let srcPixels = linePixels[i]
+    if line.len > 0 and srcPixels.len > 0:
+      let width = lineWidths[i]
+      for y in 0 ..< min(lineHeight, finalHeight - dstY):
+        copyMem(
+          addr result.pixels[((dstY + y) * totalWidth) * 4],
+          unsafeAddr srcPixels[(y * width) * 4],
+          width * 4
+        )
+    dstY += lineHeight
+
+proc cacheTextTexture(
+  artist: var Artist2D;
+  text: string;
+  pixelSize: int
+): CachedTextEntry {.gcsafe.}
+
+proc measureText*(
+  artist: var Artist2D;
+  text: string;
+  scale: cfloat = 1.0
+): tuple[w, h: int] {.gcsafe.} =
+  if text.len == 0:
+    let pixelSize = artist.fontPixelSize(scale)
+    return (w: 0, h: max(artist.lineHeight(pixelSize) div 2, 1))
+
+  let entry = artist.cacheTextTexture(text, artist.fontPixelSize(scale))
+  (w: entry.width, h: entry.height)
 
 proc cacheTextTexture(
   artist: var Artist2D;
@@ -376,19 +458,6 @@ proc cacheTextTexture(
   artist.cachedTextTextures.add(entry.texture)
   entry
 
-proc measureText*(
-  artist: var Artist2D;
-  text: string;
-  scale: cfloat = 1.0
-): tuple[w, h: int] {.gcsafe.} =
-  let pixelSize = artist.fontPixelSize(scale)
-  let lines = splitTextLines(text)
-  let lineAdvance = artist.lineHeight(pixelSize)
-  var maxWidth = 0
-  for line in lines:
-    maxWidth = max(maxWidth, artist.measureLine(line, pixelSize).w)
-  (w: maxWidth, h: max(lineAdvance * lines.len, 1))
-
 proc releaseCachedTextTextures*(artist: var Artist2D) =
   for texture in artist.cachedTextTextures:
     if not texture.isNil:
@@ -405,6 +474,12 @@ proc registerTextureFilter(
   if texture.isNil:
     return
   artist.textureFilters[texture] = filterMode
+
+proc `==`(a, b: ScissorRect): bool =
+  a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h
+
+proc `==`(a, b: QueuedScissor): bool =
+  a.enabled == b.enabled and (not a.enabled or a.rect == b.rect)
 
 proc finalizeBatch(artist: var Artist2D) =
   if artist.currentBatchCount <= 0:
@@ -424,7 +499,8 @@ proc finalizeBatch(artist: var Artist2D) =
   artist.batches.add(batch)
   artist.drawCommands.add(DrawCommand(
     mode: drawModeSprites,
-    batchIndex: uint32(artist.batches.len - 1)
+    batchIndex: uint32(artist.batches.len - 1),
+    scissor: artist.currentScissor
   ))
   artist.currentBatchStart = artist.instances.len
   artist.currentBatchCount = 0
@@ -440,10 +516,26 @@ proc finalizePrimitiveBatch(artist: var Artist2D) =
   ))
   artist.drawCommands.add(DrawCommand(
     mode: drawModePrimitives,
-    batchIndex: uint32(artist.primitiveBatches.len - 1)
+    batchIndex: uint32(artist.primitiveBatches.len - 1),
+    scissor: artist.currentScissor
   ))
   artist.currentPrimitiveStart = artist.primitiveIndices.len
   artist.currentPrimitiveCount = 0
+
+proc flushActiveBatchForStateChange(artist: var Artist2D) =
+  case artist.currentDrawMode
+  of drawModeSprites:
+    artist.finalizeBatch()
+  of drawModePrimitives:
+    artist.finalizePrimitiveBatch()
+  of drawModeNone:
+    discard
+
+proc setQueuedScissor(artist: var Artist2D; scissor: QueuedScissor) =
+  if artist.currentScissor == scissor:
+    return
+  artist.flushActiveBatchForStateChange()
+  artist.currentScissor = scissor
 
 proc textureFilter(artist: Artist2D; texture: ptr GPUTexture): TextureFilterMode =
   if texture.isNil:
@@ -759,6 +851,7 @@ proc initArtist2D*(
   if result.defaultFontPath.len == 0:
     raise newException(Artist2DError, "Artist2D requires defaultFontPath for SDL3_ttf rendering")
   result.font = openFont(result.defaultFontPath, result.defaultFontSize)
+  result.font.setStyle(defaultFontStyleBold)
   result.currentFontSize = int(result.defaultFontSize)
   let samplerInfo =
     if config.samplerInfo == default(GPUSamplerCreateInfo): defaultSamplerInfo() else: config.samplerInfo
@@ -800,6 +893,24 @@ proc beginFrame*(artist: var Artist2D) =
   artist.currentPrimitiveStart = 0
   artist.currentPrimitiveCount = 0
   artist.currentDrawMode = drawModeNone
+  artist.currentScissor = QueuedScissor()
+
+proc setScissor*(artist: var Artist2D; scissor: ScissorRect) =
+  artist.setQueuedScissor(QueuedScissor(
+    enabled: true,
+    rect: ScissorRect(
+      x: scissor.x,
+      y: scissor.y,
+      w: max(scissor.w, 0),
+      h: max(scissor.h, 0)
+    )
+  ))
+
+proc setScissor*(artist: var Artist2D; x, y, w, h: int) =
+  artist.setScissor(ScissorRect(x: x, y: y, w: w, h: h))
+
+proc clearScissor*(artist: var Artist2D) =
+  artist.setQueuedScissor(QueuedScissor())
 
 proc drawSprite*(artist: var Artist2D; sprite: Sprite2D): bool =
   if artist.currentDrawMode == drawModePrimitives:
@@ -1254,6 +1365,15 @@ proc render*(
     discard cancelGPUCommandBuffer(commandBuffer)
     raise newException(Artist2DError, "beginGPURenderPass failed: " & $getError())
 
+  var fullScissor = Rect(
+    x: 0,
+    y: 0,
+    w: cint(targetWidth),
+    h: cint(targetHeight)
+  )
+  setGPUScissor(renderPass, addr fullScissor)
+  var activeScissor = QueuedScissor()
+
   var vertexBindings = [
     GPUBufferBinding(buffer: raw(artist.quadVertexBuffer), offset: 0),
     GPUBufferBinding(buffer: raw(artist.instanceBuffer), offset: 0)
@@ -1262,7 +1382,24 @@ proc render*(
   var primitiveVertexBinding = GPUBufferBinding(buffer: raw(artist.primitiveVertexBuffer), offset: 0)
   var primitiveIndexBinding = GPUBufferBinding(buffer: raw(artist.primitiveIndexBuffer), offset: 0)
 
+  proc applyScissor(scissor: QueuedScissor) =
+    if scissor == activeScissor:
+      return
+    var rect =
+      if scissor.enabled:
+        Rect(
+          x: cint(scissor.rect.x),
+          y: cint(scissor.rect.y),
+          w: cint(scissor.rect.w),
+          h: cint(scissor.rect.h)
+        )
+      else:
+        fullScissor
+    setGPUScissor(renderPass, addr rect)
+    activeScissor = scissor
+
   for command in artist.drawCommands:
+    applyScissor(command.scissor)
     case command.mode
     of drawModeSprites:
       let batch = artist.batches[int(command.batchIndex)]

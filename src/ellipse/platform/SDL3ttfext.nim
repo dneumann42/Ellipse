@@ -3,6 +3,8 @@ import std/[strformat]
 import ./SDL3
 import ./SDL3ttf
 
+export SDL3ttf
+
 type
   Error* = object of CatchableError
 
@@ -62,6 +64,9 @@ proc openFont*(path: string; pointSize: cfloat): TTFFontHandle =
 proc setSize*(font: TTFFontHandle; pointSize: cfloat) =
   if not setFontSize(raw(font), pointSize):
     failure("TTF_SetFontSize failed")
+
+proc setStyle*(font: TTFFontHandle; style: TTF_FontStyleFlags) =
+  setFontStyle(raw(font), style)
 
 proc fontHeight*(font: TTFFontHandle): int =
   int(getFontHeight(raw(font)))

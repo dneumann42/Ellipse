@@ -4,6 +4,7 @@ import shui/widgets/inputs as shuiInputs
 import shui/widgets/statefulWidgets as shuiStateful
 import chroma
 import std/macros
+import std/math
 import std/strutils
 
 import ./rendering/artist2D
@@ -23,10 +24,33 @@ type
     disabled = false
     toggle: shuiButtons.ButtonToggleState
 
+  GuiClipState = object
+    inheritedClip: ScissorRect
+    boxClip: ScissorRect
+    childClip: ScissorRect
+
 var gActiveArtist {.threadvar.}: ptr Artist2D
+var gFontSize {.threadvar.}: int
+var gTargetClip {.threadvar.}: ScissorRect
+var gClipStack {.threadvar.}: seq[GuiClipState]
+var gRenderScale {.threadvar.}: cfloat
 
 template activeArtist: untyped =
   gActiveArtist[]
+
+proc scaled(value: int): cfloat =
+  value.cfloat * gRenderScale
+
+proc scaled(value: cfloat): cfloat =
+  value * gRenderScale
+
+proc scaledClip(clip: ScissorRect): ScissorRect =
+  ScissorRect(
+    x: int(round(clip.x.cfloat * gRenderScale)),
+    y: int(round(clip.y.cfloat * gRenderScale)),
+    w: int(round(clip.w.cfloat * gRenderScale)),
+    h: int(round(clip.h.cfloat * gRenderScale))
+  )
 
 proc colorToTint(color: Color): array[4, cfloat] =
   [color.r.cfloat, color.g.cfloat, color.b.cfloat, color.a.cfloat]
@@ -46,7 +70,24 @@ proc extractGuiButtonConfig(node: NimNode): tuple[config: GuiButtonConfig, toggl
 
 proc measureGuiText(text: string): tuple[w, h: int] =
   if gActiveArtist.isNil:
-    return (w: 0, h: 0)
+    var lines = 1
+    var widest = 0
+    var current = 0
+    for ch in text:
+      case ch
+      of '\n':
+        if current > widest:
+          widest = current
+        current = 0
+        inc lines
+      of '\r':
+        discard
+      else:
+        inc current
+    if current > widest:
+      widest = current
+    let fontSize = if gFontSize > 0: gFontSize else: 16
+    return (w: widest * (fontSize div 2), h: lines * fontSize)
   activeArtist.measureText(text)
 
 proc clamp01(value: float): float =
@@ -84,98 +125,85 @@ proc sliderFraction(value: float; minValue: float; maxValue: float): float =
     return 0.0
   clamp01((value - minValue) / (maxValue - minValue))
 
-proc clipRect(elem: Elem): tuple[x, y, w, h: int] =
-  let x1 = max(elem.box.x, elem.clipBox.x)
-  let y1 = max(elem.box.y, elem.clipBox.y)
-  let x2 = min(elem.box.x + elem.box.w, elem.clipBox.x + elem.clipBox.w)
-  let y2 = min(elem.box.y + elem.box.h, elem.clipBox.y + elem.clipBox.h)
-  (
+proc intersectClip(a, b: ScissorRect): ScissorRect =
+  let x1 = max(a.x, b.x)
+  let y1 = max(a.y, b.y)
+  let x2 = min(a.x + a.w, b.x + b.w)
+  let y2 = min(a.y + a.h, b.y + b.h)
+  ScissorRect(
     x: x1,
     y: y1,
     w: max(x2 - x1, 0),
     h: max(y2 - y1, 0)
   )
 
-proc drawBackground(elem: Elem) =
-  if elem.style.bg.a <= 0 or elem.box.w <= 0 or elem.box.h <= 0:
-    return
-  let clip = clipRect(elem)
-  if clip.w <= 0 or clip.h <= 0:
+proc clipForElem(elem: Elem): GuiClipState =
+  result.inheritedClip =
+    if elem.stopClip or gClipStack.len == 0:
+      gTargetClip
+    else:
+      gClipStack[^1].childClip
+  let boxClip = ScissorRect(x: elem.box.x, y: elem.box.y, w: elem.box.w, h: elem.box.h)
+  result.boxClip = intersectClip(result.inheritedClip, boxClip)
+  result.childClip =
+    if elem.clipOverflow:
+      result.boxClip
+    else:
+      result.inheritedClip
+
+proc applyGuiClip(clip: ScissorRect) =
+  activeArtist.setScissor(scaledClip(clip))
+
+proc drawBackground(elem: Elem; clip: ScissorRect) =
+  if elem.style.bg.a <= 0 or elem.box.w <= 0 or elem.box.h <= 0 or clip.w <= 0 or clip.h <= 0:
     return
   discard activeArtist.drawFilledRect(
-    [clip.x.cfloat, clip.y.cfloat],
-    [clip.w.cfloat, clip.h.cfloat],
+    [scaled(elem.box.x), scaled(elem.box.y)],
+    [scaled(elem.box.w), scaled(elem.box.h)],
     colorToTint(elem.style.bg)
   )
 
-proc drawBorder(elem: Elem) =
-  if elem.style.border <= 0 or elem.style.borderColor.a <= 0:
-    return
-  let clip = clipRect(elem)
-  if clip.w <= 0 or clip.h <= 0:
+proc drawBorder(elem: Elem; clip: ScissorRect) =
+  if elem.style.border <= 0 or elem.style.borderColor.a <= 0 or clip.w <= 0 or clip.h <= 0:
     return
   discard activeArtist.drawRect(
-    [clip.x.cfloat, clip.y.cfloat],
-    [clip.w.cfloat, clip.h.cfloat],
+    [scaled(elem.box.x), scaled(elem.box.y)],
+    [scaled(elem.box.w), scaled(elem.box.h)],
     colorToTint(elem.style.borderColor),
-    elem.style.border.cfloat
+    scaled(elem.style.border.cfloat)
   )
 
-proc drawTextContent(elem: Elem) =
-  if elem.text.len == 0 or elem.style.fg.a <= 0:
+proc drawTextContent(elem: Elem; clip: ScissorRect) =
+  if gActiveArtist.isNil or elem.text.len == 0 or elem.style.fg.a <= 0 or clip.w <= 0 or clip.h <= 0:
     return
 
-  let clip = clipRect(elem)
-  if clip.w <= 0 or clip.h <= 0:
-    return
-
-  let textSize = measureGuiText(elem.text)
   let textX = elem.box.x + elem.style.padding
   let textY = elem.box.y + elem.style.padding
-  if textX < clip.x or textY < clip.y:
-    return
-  if textX + textSize.w > clip.x + clip.w or textY + textSize.h > clip.y + clip.h:
+
+  if textX < 0 or textY < 0:
     return
 
   let textPos =
     [
-      textX.cfloat,
-      textY.cfloat
+      scaled(textX),
+      scaled(textY)
     ]
-  discard activeArtist.drawText(
-    elem.text,
-    textPos,
-    colorToTint(elem.style.fg),
-    1'f32
-  )
+  let tint = colorToTint(elem.style.fg)
+  discard activeArtist.drawText(elem.text, textPos, tint, gRenderScale)
 
-proc drawScrollIndicator(elem: Elem) =
-  if elem.scrollThumbHeight <= 0:
-    return
-
-  let clip = clipRect(elem)
-  if clip.w <= 0 or clip.h <= 0:
+proc drawScrollIndicator(elem: Elem; clip: ScissorRect) =
+  if elem.scrollThumbHeight <= 0 or clip.w <= 0 or clip.h <= 0:
     return
 
   let trackX = elem.box.x + max(elem.box.w - 8, 0)
-  if trackX >= clip.x + clip.w:
-    return
-  let trackY = max(elem.box.y, clip.y)
-  let trackH = min(elem.box.y + elem.box.h, clip.y + clip.h) - trackY
-  if trackH <= 0:
-    return
   discard activeArtist.drawFilledRect(
-    [max(trackX, clip.x).cfloat, trackY.cfloat],
-    [min(6, clip.x + clip.w - max(trackX, clip.x)).cfloat, trackH.cfloat],
+    [scaled(trackX), scaled(elem.box.y)],
+    [scaled(6), scaled(elem.box.h)],
     [1'f32, 1'f32, 1'f32, 0.08'f32]
   )
-  let thumbY = max(elem.scrollThumbY, clip.y)
-  let thumbH = min(elem.scrollThumbY + elem.scrollThumbHeight, clip.y + clip.h) - thumbY
-  if thumbH <= 0:
-    return
   discard activeArtist.drawFilledRect(
-    [max(trackX, clip.x).cfloat, thumbY.cfloat],
-    [min(6, clip.x + clip.w - max(trackX, clip.x)).cfloat, thumbH.cfloat],
+    [scaled(trackX), scaled(elem.scrollThumbY)],
+    [scaled(6), scaled(elem.scrollThumbHeight)],
     [1'f32, 1'f32, 1'f32, 0.28'f32]
   )
 
@@ -185,11 +213,20 @@ proc drawGuiElement(elem: Elem; phase: DrawPhase) {.gcsafe.} =
 
   case phase
   of BeforeChildren:
-    drawBackground(elem)
-    drawBorder(elem)
-    drawTextContent(elem)
+    let clipState = clipForElem(elem)
+    gClipStack.add(clipState)
+    applyGuiClip(clipState.boxClip)
+    drawBackground(elem, clipState.boxClip)
+    drawBorder(elem, clipState.boxClip)
+    applyGuiClip(clipState.inheritedClip)
+    drawTextContent(elem, clipState.inheritedClip)
   of AfterChildren:
-    drawScrollIndicator(elem)
+    if gClipStack.len <= 0:
+      return
+    let clipState = gClipStack[^1]
+    applyGuiClip(clipState.boxClip)
+    drawScrollIndicator(elem, clipState.boxClip)
+    discard gClipStack.pop()
 
 proc initGuiContext*(): GuiContext =
   result.ui = shui.UI.init()
@@ -204,14 +241,23 @@ proc render*(
   artist: var Artist2D;
   width: int;
   height: int;
-  deltaTime: float
+  deltaTime: float;
+  renderScale: cfloat = 1'f32
 ) =
   gActiveArtist = addr artist
+  gFontSize = artist.defaultFontSize.int
+  gTargetClip = ScissorRect(x: 0, y: 0, w: width, h: height)
+  gClipStack.setLen(0)
+  gRenderScale = max(renderScale, 1'f32)
+  artist.clearScissor()
   try:
     gui.ui.updateWidgets(deltaTime)
     gui.ui.updateLayout((x: 0, y: 0, w: width, h: height))
     gui.ui.draw()
   finally:
+    artist.clearScissor()
+    gClipStack.setLen(0)
+    gRenderScale = 1'f32
     gActiveArtist = nil
 
 proc clearTransientInput*(gui: var GuiContext) =
@@ -374,26 +420,36 @@ macro button*(text: string; id: ElemId; body: untyped): untyped =
     block:
       var bgCol =
         if `id`.hot(ui) or `toggleCheck`:
-          color(0.35, 0.34, 0.7)
+          color(0.90, 0.62, 0.18)
         else:
-          color(0.1, 0.1, 0.3)
-      var fgCol = color(1.0)
+          color(0.73, 0.48, 0.12)
+      var fgCol = color(0.08, 0.08, 0.12)
+      var borderCol =
+        if `id`.hot(ui) or `toggleCheck`:
+          color(1.0, 0.82, 0.40)
+        else:
+          color(0.94, 0.67, 0.22)
       if `id`.down(ui):
-        bgCol = color(0.6, 0.5, 0.9)
+        bgCol = color(1.0, 0.78, 0.28)
+        borderCol = color(1.0, 0.90, 0.56)
       if config.disabled:
-        bgCol = color(0.1, 0.1, 0.2)
-        fgCol = color(0.7)
+        bgCol = color(0.22, 0.19, 0.14)
+        fgCol = color(0.62, 0.58, 0.50)
+        borderCol = color(0.42, 0.35, 0.22)
       shui.elem:
         id = `id`
         style = Style(
           fg: fgCol,
           bg: bgCol,
-          borderColor: color(0.6, 0.6, 0.6),
-          border: 1,
-          padding: 4,
-          borderRadius: 8.0,
+          borderColor: borderCol,
+          border: 2,
+          padding: 7,
+          borderRadius: 10.0,
         )
-        size = (w: Fit, h: Fit)
+        size = (
+          w: Sizing(kind: Fit, min: 72, max: 240),
+          h: Sizing(kind: Fixed, min: 34, max: 34)
+        )
         dir = Row
         align = Center
         crossAlign = Center
@@ -582,8 +638,106 @@ template listBox*(
             size = (w: FitSize, h: FitSize)
 
 template comboBox*(value: var string; widgetId: ElemId; body: untyped) =
-  shuiInputs.comboBox(value, widgetId):
-    body
+  block:
+    let focused = widgetId.focused(ui)
+
+    ui.registerWidget(widgetId)
+
+    if focused:
+      if widgetId.pressed(ui) or ui.input.enterPressed or ui.input.tabPressed:
+        widgetId.unfocus(ui)
+    else:
+      if widgetId.pressed(ui):
+        widgetId.focus(ui)
+
+    var bgCol =
+      if widgetId.hot(ui) or focused:
+        color(0.35, 0.34, 0.7)
+      else:
+        color(0.1, 0.1, 0.3)
+    let fgCol = color(1.0)
+    if widgetId.down(ui):
+      bgCol = color(0.6, 0.5, 0.9)
+
+    shui.elem:
+      dir = Col
+      shui.elem:
+        id = widgetId
+        style = Style(
+          fg: fgCol,
+          bg: bgCol,
+          borderColor: color(0.6, 0.6, 0.6),
+          border: 1,
+          padding: 4,
+          borderRadius: 0.4,
+          gap: 4
+        )
+        size = (w: Fit, h: Fit)
+        dir = Col
+        align = Start
+        crossAlign = Start
+        shui.elem:
+          dir = Row
+          align = Center
+          crossAlign = Center
+          size = (w: Fit, h: Fit)
+          style = Style(
+            fg: fgCol,
+            bg: color(0.0, 0.0, 0.0, 0.0)
+          )
+          shui.elem:
+            text = value
+            style = Style(fg: fgCol, bg: color(0.0, 0.0, 0.0, 0.0))
+          shui.elem:
+            text = "[-]"
+            style = Style(fg: fgCol, bg: color(0.0, 0.0, 0.0, 0.0))
+
+      if widgetId.focused(ui):
+        let comboBoxId {.inject.} = widgetId
+        var comboValue {.inject.} = value
+        shui.elem:
+          floating = true
+          dir = Col
+          style = Style(
+            fg: fgCol,
+            bg: bgCol,
+            borderColor: color(0.6, 0.6, 0.6),
+            border: 1,
+            padding: 4,
+            borderRadius: 0.1,
+            gap: 4
+          )
+          size = (w: Sizing(kind: Fit, min: 200, max: 400), h: Fit)
+          body
+        value = comboValue
 
 template comboOption*(key: string; caption: string) =
-  shuiInputs.keyValueOption(key, caption)
+  block:
+    let optionId = ElemId(key)
+    if optionId.pressed(ui):
+      comboValue = key
+      comboBoxId.unfocus(ui)
+    ui.registerWidget(optionId)
+
+    var bgCol =
+      if optionId.hot(ui):
+        color(0.1, 0.1, 0.3)
+      else:
+        color(0.35, 0.34, 0.7)
+    let fgCol = color(1.0)
+    if optionId.down(ui):
+      bgCol = color(0.6, 0.5, 0.9)
+
+    shui.elem:
+      id = optionId
+      style = Style(
+        fg: fgCol,
+        bg: bgCol,
+        padding: 4,
+        borderRadius: 0.4,
+      )
+      size = (w: Grow, h: Fit)
+      dir = Row
+      shui.elem:
+        text = caption
+        style = Style(fg: fgCol, bg: color(0.0, 0.0, 0.0, 0.0))
