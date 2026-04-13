@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "packages": {
+    "nim": {
+      "version": "2.2.8",
+      "vcsRevision": "f1f6cb4826c6d878e5a3304b0196d45a03cfaf5c",
+      "url": "https://github.com/nim-lang/Nim.git",
+      "downloadMethod": "git",
+      "dependencies": [],
+      "checksums": {
+        "sha1": "bb2aee4f676f652012fb4e8ce71ffbf03ed7e639"
+      }
+    },
+    "chroma": {
+      "version": "1.0.0",
+      "vcsRevision": "8bf4a0933ff405f83dc3a176199f528601e5b796",
+      "url": "https://github.com/treeform/chroma",
+      "downloadMethod": "git",
+      "dependencies": [
+        "nim"
+      ],
+      "checksums": {
+        "sha1": "76a12834f1b7e211e4232c1e13960accba6bd477"
+      }
+    },
+    "shui": {
+      "version": "0.1.0",
+      "vcsRevision": "87bdbfa43c0234da74896322ebb9a7159351ba1a",
+      "url": "https://github.com/dneumann42/shui",
+      "downloadMethod": "git",
+      "dependencies": [
+        "nim",
+        "chroma"
+      ],
+      "checksums": {
+        "sha1": "01ce7da7fd184867434aab040d235a9afb68c0b0"
+      }
+    }
+  },
+  "tasks": {}
+}

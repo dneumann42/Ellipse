@@ -7,7 +7,6 @@
 # Local Codex state.
 .codex
 .codex/
-vendor/
 
 # Common binary artifacts.
 *.a

@@ -12,7 +12,7 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.8"
-requires "shui >= 0.1.0"
+requires "https://github.com/dneumann42/shui >= 0.1.0"
 
 task test, "Run automated tests":
   exec "nim c -r tests/test1.nim"
