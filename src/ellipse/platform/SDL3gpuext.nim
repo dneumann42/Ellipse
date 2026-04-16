@@ -134,6 +134,14 @@ proc getGPUSwapchainTextureFormat*(device: GPUDeviceHandle; window: WindowHandle
 proc getGPUSwapchainTextureFormat*(claim: GPUWindowClaimHandle): GPUTextureFormat =
   SDL3gpu.getGPUSwapchainTextureFormat(claim.meta, claim.handle)
 
+proc gpuTextureSupportsFormat*(
+  device: GPUDeviceHandle,
+  format: GPUTextureFormat,
+  `type`: GPUTextureType,
+  usage: GPUTextureUsageFlags
+): bool =
+  SDL3gpu.gpuTextureSupportsFormat(raw(device), format, `type`, usage)
+
 proc createGPUShader*(device: ptr GPUDevice; createInfo: GPUShaderCreateInfo): GPUShaderHandle =
   var mutableCreateInfo = createInfo
   result.handle = SDL3gpu.createGPUShader(device, addr mutableCreateInfo)

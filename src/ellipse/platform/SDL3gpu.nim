@@ -344,6 +344,18 @@ type
     padding1*: uint8
     padding2*: uint8
 
+  GPUDepthStencilTargetInfo* {.importc: "SDL_GPUDepthStencilTargetInfo", header: "<SDL3/SDL_gpu.h>", bycopy.} = object
+    texture*: ptr GPUTexture
+    clear_depth*: cfloat
+    load_op*: GPULoadOp
+    store_op*: GPUStoreOp
+    stencil_load_op*: GPULoadOp
+    stencil_store_op*: GPUStoreOp
+    cycle*: bool
+    clear_stencil*: uint8
+    mip_level*: uint8
+    layer*: uint8
+
 const
   GPU_TEXTUREFORMAT_INVALID* = 0'u32
   GPU_TEXTUREFORMAT_A8_UNORM* = 1'u32
@@ -352,6 +364,11 @@ const
   GPU_TEXTUREFORMAT_R8G8B8A8_UNORM* = 4'u32
   GPU_TEXTUREFORMAT_R16_UNORM* = 5'u32
   GPU_TEXTUREFORMAT_B8G8R8A8_UNORM* = 12'u32
+  GPU_TEXTUREFORMAT_D16_UNORM* = 58'u32
+  GPU_TEXTUREFORMAT_D24_UNORM* = 59'u32
+  GPU_TEXTUREFORMAT_D32_FLOAT* = 60'u32
+  GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT* = 61'u32
+  GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT* = 62'u32
 
   GPU_SHADERFORMAT_INVALID* = 0'u32
   GPU_SHADERFORMAT_PRIVATE* = 1'u32 shl 0
@@ -412,6 +429,16 @@ proc getGPUSwapchainTextureFormat*(device: ptr GPUDevice; window: ptr Window): G
 
 proc getGPUTextureFormatFromPixelFormat*(format: PixelFormat): GPUTextureFormat {.
   importc: "SDL_GetGPUTextureFormatFromPixelFormat",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
+proc gpuTextureSupportsFormat*(
+  device: ptr GPUDevice,
+  format: GPUTextureFormat,
+  `type`: GPUTextureType,
+  usage: GPUTextureUsageFlags
+): bool {.
+  importc: "SDL_GPUTextureSupportsFormat",
   header: "<SDL3/SDL_gpu.h>"
 .}
 

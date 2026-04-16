@@ -184,3 +184,57 @@ proc createAlphaBlendedColorPipeline*(
   )
 
   createGPUGraphicsPipeline(device, pipelineInfo)
+
+proc createDepthTexturedPipeline*(
+  device: GPUDeviceHandle,
+  swapchainFormat: GPUTextureFormat,
+  depthFormat: GPUTextureFormat,
+  vertexShader: GPUShaderHandle,
+  fragmentShader: GPUShaderHandle,
+  vertexBufferDescriptions: ptr GPUVertexBufferDescription,
+  numVertexBuffers: uint32,
+  vertexAttributes: ptr GPUVertexAttribute,
+  numVertexAttributes: uint32
+): GPUGraphicsPipelineHandle =
+  ## Creates the default opaque 3D textured pipeline with depth test/write.
+  var colorTarget = createColorTargetDescription(swapchainFormat, false)
+
+  let pipelineInfo = GPUGraphicsPipelineCreateInfo(
+    vertex_shader: raw(vertexShader),
+    fragment_shader: raw(fragmentShader),
+    vertex_input_state: GPUVertexInputState(
+      vertex_buffer_descriptions: vertexBufferDescriptions,
+      num_vertex_buffers: numVertexBuffers,
+      vertex_attributes: vertexAttributes,
+      num_vertex_attributes: numVertexAttributes
+    ),
+    primitive_type: gpuPrimitiveTypeTriangleList,
+    rasterizer_state: GPURasterizerState(
+      fill_mode: gpuFillModeFill,
+      cull_mode: gpuCullModeBack,
+      front_face: gpuFrontFaceCounterClockwise,
+      enable_depth_bias: false,
+      enable_depth_clip: true
+    ),
+    multisample_state: GPUMultisampleState(
+      sample_count: gpuSampleCount1,
+      sample_mask: 0,
+      enable_mask: false,
+      enable_alpha_to_coverage: false
+    ),
+    depth_stencil_state: GPUDepthStencilState(
+      compare_op: gpuCompareOpLessOrEqual,
+      enable_depth_test: true,
+      enable_depth_write: true,
+      enable_stencil_test: false
+    ),
+    target_info: GPUGraphicsPipelineTargetInfo(
+      color_target_descriptions: addr colorTarget,
+      num_color_targets: 1,
+      depth_stencil_format: depthFormat,
+      has_depth_stencil_target: true
+    ),
+    props: 0
+  )
+
+  createGPUGraphicsPipeline(device, pipelineInfo)

@@ -7,6 +7,7 @@ const
   PluginLoadSceneFunctions = CacheTable"PluginLoadSceneFunctions"
   PluginUpdateFunctions = CacheTable"PluginUpdateFunctions"
   PluginAlwaysUpdateFunctions = CacheTable"PluginAlwaysUpdateFunctions"
+  PluginDraw3DFunctions = CacheTable"PluginDraw3DFunctions"
   PluginDrawFunctions = CacheTable"PluginDrawFunctions"
   PluginDrawHudFunctions = CacheTable"PluginDrawHudFunctions"
 
@@ -181,6 +182,8 @@ proc getFunctionCacheTable*(kind: string): CacheTable =
     result = PluginAlwaysUpdateFunctions
   elif kind == "draw":
     result = PluginDrawFunctions
+  elif kind == "draw3D":
+    result = PluginDraw3DFunctions
   elif kind == "drawHud":
     result = PluginDrawHudFunctions
   elif kind == "load":

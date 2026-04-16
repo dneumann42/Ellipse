@@ -5,9 +5,9 @@ import ./SDL3gpu
 import ./SDL3gpuext
 import ./SDL3ttfext
 import ../gui
-import ../rendering/[artist2D, canvases, gpucontext]
+import ../rendering/[artist2D, artist3D, canvases, gpucontext]
 
-export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, canvases, gpucontext
+export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, artist3D, canvases, gpucontext
 
 {.push raises: [].}
 
@@ -33,6 +33,7 @@ type
     driverName*: cstring
     debugMode*: bool
     maxSprites*: int
+    max3DQuads*: int
     maxTextureSlots*: int
     clearColor*: FColor
     defaultFontPath*: string
@@ -48,6 +49,7 @@ type
     context*: GPUWindowContext
     ttf*: TTFAppHandle
     artist*: Artist2D
+    artist3D*: Artist3D
     canvasManager*: CanvasManager
     gui*: GuiContext
     fpsText: string
@@ -199,6 +201,18 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
           defaultFontSize: gApplication.config.defaultFontSize
         )
       )
+      gApplication.artist3D = initArtist3D(
+        gApplication.context.device,
+        getGPUSwapchainTextureFormat(gApplication.context.claim),
+        Artist3DConfig(
+          maxQuads:
+            if gApplication.config.max3DQuads > 0:
+              gApplication.config.max3DQuads
+            else:
+              20_000,
+          maxTextureSlots: artistConfig.maxTextureSlots
+        )
+      )
       gApplication.canvasManager = initCanvasManager(
         gApplication.context.device,
         Artist2DConfig(
@@ -247,6 +261,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     template canvases: untyped {.inject, used.} = gApplication.canvasManager
     template artist: untyped {.inject, used.} =
       currentArtistPtr(gApplication.canvasManager, addr gApplication.artist)[]
+    template artist3D: untyped {.inject, used.} = gApplication.artist3D
 
     withFields(gApplication.state, gApplication):
       try:
@@ -278,6 +293,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     template canvases: untyped {.inject, used.} = app.canvasManager
     template artist: untyped {.inject, used.} =
       currentArtistPtr(app.canvasManager, addr app.artist)[]
+    template artist3D: untyped {.inject, used.} = app.artist3D
 
     scenes.startFrame()
     scenes.handlePushed()
@@ -334,6 +350,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       return if submitGPUCommandBuffer(commandBuffer): appContinue else: appFailure
 
     beginFrame(app.artist)
+    beginFrame(app.artist3D)
     beginFrame(app.canvasManager)
     try:
       clearCanvases(app.canvasManager, commandBuffer)
@@ -354,12 +371,14 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       template canvases: untyped {.inject, used.} = app.canvasManager
       template artist: untyped {.inject, used.} =
         currentArtistPtr(app.canvasManager, addr app.artist)[]
+      template artist3D: untyped {.inject, used.} = app.artist3D
       template ui: untyped {.inject, used.} = app.gui.ui
       template swapchainWidth: untyped {.inject, used.} = swapchainWidth
       template swapchainHeight: untyped {.inject, used.} = swapchainHeight
 
       withFields(app.state, app):
         try:
+          generatePluginStep(draw3D)
           generatePluginStep(draw)
         except CatchableError as err:
           reportException("application draw failed", err)
@@ -382,6 +401,17 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
           defaultGuiSupersampleScale.cfloat
         )
       renderCanvases(app.canvasManager, commandBuffer)
+      render(
+        app.artist3D,
+        commandBuffer,
+        swapchainTexture,
+        swapchainWidth,
+        swapchainHeight,
+        if app.config.clearColor == default(FColor):
+          FColor(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
+        else:
+          app.config.clearColor
+      )
       composeCanvases(app.canvasManager, app.artist, swapchainWidth, swapchainHeight)
       discard drawText(
         app.artist,
@@ -403,10 +433,11 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         swapchainTexture,
         swapchainWidth,
         swapchainHeight,
-        if app.config.clearColor == default(FColor):
+        (if app.config.clearColor == default(FColor):
           FColor(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
         else:
-          app.config.clearColor
+          app.config.clearColor),
+        renderTargetLoad
       )
     except CatchableError as err:
       reportException("application render failed", err)
