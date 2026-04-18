@@ -27,7 +27,7 @@ void main() {
   vec3 normal = normalize(fragNormal);
   vec3 lightDir = normalize(vec3(-0.45, 0.75, 0.55));
   float diffuse = max(dot(normal, lightDir), 0.0);
-  float light = 0.28 + diffuse * 0.72;
+  float light = 1.0 + diffuse * 0.25;
   vec4 texel = sampleTexture(fragTextureIndex, fragUv);
   outColor = vec4(texel.rgb * fragColor.rgb * light, texel.a * fragColor.a);
 }
