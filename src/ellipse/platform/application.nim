@@ -8,8 +8,9 @@ import ../gui
 import ../resources
 
 import ../rendering/[artist2D, artist3D, canvases, gpucontext]
+import ../inputs
 
-export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, artist3D, canvases, gpucontext
+export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, artist3D, canvases, gpucontext, inputs
 
 {.push raises: [].}
 
@@ -19,6 +20,9 @@ const
   guiCanvasId = "__ellipse.gui"
 
 type
+  NoAction* = enum
+    noAction
+
   KeyDownMessage* = object
     keycode*: Keycode
     scancode*: Scancode
@@ -41,12 +45,13 @@ type
     defaultFontPath*: string
     defaultFontSize*: cfloat
 
-  Application*[T] = object
+  Application*[T, A] = object
     config*: AppConfig
     pluginStates*: PluginStates
     messages*: PluginMessages
     scenes*: SceneStack
     resources*: Resources
+    inputs*: Input[A]
     quitRequested*: bool
     state*: T
     context*: GPUWindowContext
@@ -99,15 +104,15 @@ proc reportException(context: string; err: ref CatchableError) =
   if trace.len > 0:
     flushStderr(trace)
 
-proc destroyApplication[T](app: ref Application[T]) =
+proc destroyApplication[T, A](app: ref Application[T, A]) =
   if app.isNil:
     return
   if not raw(app.context.device).isNil:
     app.artist.releaseCachedTextTextures()
   reset(app[])
 
-proc normalizedWindowPosition[T](
-  app: ref Application[T];
+proc normalizedWindowPosition[T, A](
+  app: ref Application[T, A];
   x: cfloat;
   y: cfloat
 ): tuple[x, y: int] =
@@ -126,8 +131,8 @@ proc normalizedWindowPosition[T](
 
   (x: int(x), y: int(y))
 
-template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
-  var gApplication {.global.}: ref Application[T]
+template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInputs: Input[A]): untyped =
+  var gApplication {.global.}: ref Application[T, A]
 
   proc appInitCallback(
     appState: ptr pointer,
@@ -138,10 +143,11 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     discard argv
 
     new(gApplication)
-    gApplication[] = Application[T](
+    gApplication[] = Application[T, A](
       config: cfg,
       messages: PluginMessages.init(),
       scenes: SceneStack.new(),
+      inputs: initialInputs,
       state: initialState
     )
 
@@ -258,6 +264,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       scenes {.inject.} = gApplication.scenes
       pluginStates {.inject.} = gApplication.pluginStates
       messages {.inject.} = gApplication.messages
+      inputs {.inject.} = gApplication.inputs
       quit {.inject.} = gApplication.quitRequested
     template window: untyped {.inject, used.} = raw(gApplication.context.window)
     template device: untyped {.inject, used.} = raw(gApplication.context.device)
@@ -277,12 +284,13 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     gApplication.scenes = scenes
     gApplication.pluginStates = pluginStates
     gApplication.messages = messages
+    gApplication.inputs = inputs
     gApplication.quitRequested = quit
 
     appContinue
 
   proc iterateCallback(appState: pointer): AppResult {.cdecl.} =
-    let app = cast[ref Application[T]](appState)
+    let app = cast[ref Application[T, A]](appState)
     defer:
       app.gui.clearTransientInput()
 
@@ -290,6 +298,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       scenes {.inject.} = app.scenes
       pluginStates {.inject.} = app.pluginStates
       messages {.inject.} = app.messages
+      inputs {.inject.} = app.inputs
       quit {.inject.} = app.quitRequested
     template window: untyped {.inject, used.} = raw(app.context.window)
     template device: untyped {.inject, used.} = raw(app.context.device)
@@ -297,6 +306,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     template artist: untyped {.inject, used.} =
       currentArtistPtr(app.canvasManager, addr app.artist)[]
     template artist3D: untyped {.inject, used.} = app.artist3D
+    template deltaSeconds: untyped {.inject, used.} = app.deltaSeconds
 
     scenes.startFrame()
     scenes.handlePushed()
@@ -314,6 +324,8 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     app.scenes = scenes
     app.pluginStates = pluginStates
     app.messages = messages
+    app.inputs = inputs
+    app.inputs.lateUpdate()
     app.quitRequested = quit
 
     if app.quitRequested:
@@ -367,6 +379,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       var
         pluginStates {.inject.} = app.pluginStates
         messages {.inject.} = app.messages
+        inputs {.inject.} = app.inputs
         scenes {.inject.} = app.scenes
         quit {.inject.} = app.quitRequested
       template window: untyped {.inject, used.} = raw(app.context.window)
@@ -390,6 +403,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
 
       app.pluginStates = pluginStates
       app.messages = messages
+      app.inputs = inputs
       app.scenes = scenes
       app.quitRequested = quit
 
@@ -454,14 +468,14 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     appContinue
 
   proc eventCallback(appState: pointer; event: ptr Event): AppResult {.cdecl.} =
-    let app = cast[ref Application[T]](appState)
+    let app = cast[ref Application[T, A]](appState)
 
     case event[].`type`
     of EVENT_QUIT, EVENT_WINDOW_CLOSE_REQUESTED:
       app.quitRequested = true
       appSuccess
     of EVENT_KEY_DOWN:
-      case event[].key.scancode.ord
+      case event[].key.scancode
       of SCANCODE_BACKSPACE:
         app.gui.pressBackspace()
       of SCANCODE_RETURN:
@@ -470,11 +484,14 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
         app.gui.pressTab()
       else:
         discard
-      app.messages.send(KeyDownMessage(
-        keycode: event[].key.key,
-        scancode: event[].key.scancode,
-        repeat: event[].key.repeat
-      ))
+      app.inputs.handleKeyDown(
+        event[].key.key,
+        event[].key.scancode,
+        event[].key.repeat
+      )
+      appContinue
+    of EVENT_KEY_UP:
+      app.inputs.handleKeyUp(event[].key.key, event[].key.scancode)
       appContinue
     of EVENT_TEXT_INPUT:
       if not event[].text.text.isNil:
@@ -515,7 +532,7 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
       if appState.isNil:
         gApplication
       else:
-        cast[ref Application[T]](appState)
+        cast[ref Application[T, A]](appState)
 
     if not app.isNil and not raw(app.context.window).isNil:
       discard stopTextInput(raw(app.context.window))
@@ -532,5 +549,8 @@ template generateApplication[T](cfg: AppConfig, initialState: T): untyped =
     quitCallback
   )
 
+template startApplication*[T, A](config: AppConfig, initialState: T, inputs: Input[A]): untyped =
+  generateApplication(config, initialState, inputs)
+
 template startApplication*[T](config: AppConfig, initialState: T): untyped =
-  generateApplication(config, initialState)
+  generateApplication(config, initialState, binder[NoAction]().build())

@@ -256,7 +256,7 @@ plugin Demo:
       messages.handle(KeyDownMessage)
       return
 
-    case msg.scancode.ord
+    case msg.scancode
     of SCANCODE_1:
       canvasScaleMode = csmContain
     of SCANCODE_2:

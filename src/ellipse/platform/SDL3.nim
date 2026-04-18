@@ -16,7 +16,20 @@ type
   MouseButtonFlags* = uint32
 
   Scancode* {.size: sizeof(cint), importc: "SDL_Scancode", header: "<SDL3/SDL_scancode.h>".} = enum
-    scancodeUnknown = 0
+    scancodeUnknown = 0,
+    scancodeA = 4,
+    scancodeD = 7,
+    scancodeE = 8,
+    scancodeQ = 20,
+    scancodeS = 22,
+    scancodeW = 26,
+    scancode1 = 30,
+    scancode2 = 31,
+    scancode3 = 32,
+    scancode4 = 33,
+    scancodeReturn = 40,
+    scancodeBackspace = 42,
+    scancodeTab = 43
 
   MouseWheelDirection* {.size: sizeof(cint), importc: "SDL_MouseWheelDirection", header: "<SDL3/SDL_mouse.h>".} = enum
     mouseWheelNormal = 0
@@ -161,13 +174,19 @@ const
   SDLK_2* = 0x00000032'u32
   SDLK_3* = 0x00000033'u32
   SDLK_4* = 0x00000034'u32
-  SCANCODE_1* = 30
-  SCANCODE_2* = 31
-  SCANCODE_3* = 32
-  SCANCODE_4* = 33
-  SCANCODE_RETURN* = 40
-  SCANCODE_BACKSPACE* = 42
-  SCANCODE_TAB* = 43
+  SCANCODE_A* = scancodeA
+  SCANCODE_D* = scancodeD
+  SCANCODE_E* = scancodeE
+  SCANCODE_Q* = scancodeQ
+  SCANCODE_S* = scancodeS
+  SCANCODE_W* = scancodeW
+  SCANCODE_1* = scancode1
+  SCANCODE_2* = scancode2
+  SCANCODE_3* = scancode3
+  SCANCODE_4* = scancode4
+  SCANCODE_RETURN* = scancodeReturn
+  SCANCODE_BACKSPACE* = scancodeBackspace
+  SCANCODE_TAB* = scancodeTab
   BUTTON_LEFT* = 1'u8
   BUTTON_RIGHT* = 3'u8
 

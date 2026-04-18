@@ -183,7 +183,7 @@ plugin Demo:
       messages.handle(KeyDownMessage)
       return
 
-    case msg.scancode.ord
+    case msg.scancode
     of SCANCODE_1:
       supersampleScale = 1
     of SCANCODE_2:
