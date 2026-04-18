@@ -204,10 +204,43 @@ proc createSurface*(width: int; height: int; format: PixelFormat): SurfaceHandle
   if result.handle.isNil:
     failure("createSurface failed")
 
+proc lockSurface*(surface: ptr Surface) =
+  if not SDL3.lockSurface(surface):
+    failure("lockSurface failed")
+
+proc lockSurface*(surface: SurfaceHandle) =
+  lockSurface(raw(surface))
+
+proc unlockSurface*(surface: ptr Surface) =
+  SDL3.unlockSurface(surface)
+
+proc unlockSurface*(surface: SurfaceHandle) =
+  unlockSurface(raw(surface))
+
+proc convertSurface*(surface: ptr Surface; format: PixelFormat): SurfaceHandle =
+  result.handle = SDL3.convertSurface(surface, format)
+  if result.handle.isNil:
+    failure("convertSurface failed")
+
+proc convertSurface*(surface: SurfaceHandle; format: PixelFormat): SurfaceHandle =
+  convertSurface(raw(surface), format)
+
 proc loadSurface*(path: string): SurfaceHandle =
   result.handle = SDL3.loadSurface(path.cstring)
   if result.handle.isNil:
     failure(&"loadSurface failed for '{path}'")
+
+proc loadPng*(path: string): SurfaceHandle =
+  result.handle = SDL3.loadPng(path.cstring)
+  if result.handle.isNil:
+    failure(&"loadPng failed for '{path}'")
+
+proc savePng*(surface: ptr Surface; path: string) =
+  if not SDL3.savePng(surface, path.cstring):
+    failure(&"savePng failed for '{path}'")
+
+proc savePng*(surface: SurfaceHandle; path: string) =
+  savePng(raw(surface), path)
 
 proc loadBmp*(path: string): SurfaceHandle =
   result.handle = SDL3.loadBmp(path.cstring)

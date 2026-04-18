@@ -1,5 +1,5 @@
-import ellipse/[gui, resources]
-export gui, resources
+import ellipse/[atlas, gui, resources]
+export atlas, gui, resources
 
 import ellipse/platform/application
 import ellipse/rendering/[artist2D, artist3D, canvases, gpucontext]

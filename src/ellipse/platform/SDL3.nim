@@ -279,8 +279,36 @@ proc destroySurface*(surface: ptr Surface) {.
   header: "<SDL3/SDL_surface.h>"
 .}
 
+proc lockSurface*(surface: ptr Surface): bool {.
+  importc: "SDL_LockSurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc unlockSurface*(surface: ptr Surface) {.
+  importc: "SDL_UnlockSurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc convertSurface*(
+  surface: ptr Surface,
+  format: PixelFormat
+): ptr Surface {.
+  importc: "SDL_ConvertSurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
 proc loadSurface*(file: cstring): ptr Surface {.
   importc: "SDL_LoadSurface",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc loadPng*(file: cstring): ptr Surface {.
+  importc: "SDL_LoadPNG",
+  header: "<SDL3/SDL_surface.h>"
+.}
+
+proc savePng*(surface: ptr Surface; file: cstring): bool {.
+  importc: "SDL_SavePNG",
   header: "<SDL3/SDL_surface.h>"
 .}
 
