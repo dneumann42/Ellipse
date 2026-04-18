@@ -1,10 +1,12 @@
 import std/[macros, strutils]
 import ../plugins
-import ./SDL3
-import ./SDL3gpu
-import ./SDL3gpuext
-import ./SDL3ttfext
+import SDL3
+import SDL3gpu
+import SDL3gpuext
+import SDL3ttfext
 import ../gui
+import ../resources
+
 import ../rendering/[artist2D, artist3D, canvases, gpucontext]
 
 export macros, plugins, SDL3, SDL3gpu, SDL3gpuext, gui, artist2D, artist3D, canvases, gpucontext
@@ -44,6 +46,7 @@ type
     pluginStates*: PluginStates
     messages*: PluginMessages
     scenes*: SceneStack
+    resources*: Resources
     quitRequested*: bool
     state*: T
     context*: GPUWindowContext
