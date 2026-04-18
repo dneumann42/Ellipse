@@ -19,6 +19,7 @@ requires "vmath >= 2.0.1"
 task test, "Run automated tests":
   exec "nim c -r tests/test1.nim"
   exec "nim c -r tests/t_atlas.nim"
+  exec "nim c -r tests/t_gridlighting.nim"
 
 task test_sdl3_demo, "Run the manual SDL3 callback hello-world demo test":
   exec "nim c -r tests/t_sdl3_hello.nim"

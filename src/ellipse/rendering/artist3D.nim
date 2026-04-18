@@ -5,7 +5,7 @@ import vmath
 import ../platform/SDL3
 import ../platform/SDL3gpu
 import ../platform/SDL3gpuext
-import ./[artist2D, gpupipelines, gpushaders, gpuuploads]
+import ./[artist2D, gpupipelines, gpushaders, gpuuploads, gridlighting]
 
 type
   Artist3DError* = object of CatchableError
@@ -21,6 +21,7 @@ type
     normal*: Vec3
     color*: Vec4
     textureIndex*: cfloat
+    lightingPosition*: Vec3
 
   Artist3DConfig* = object
     maxQuads*: int
@@ -54,6 +55,9 @@ type
     normal*: Vec3
     texture*: Texture3D
     filterMode*: TextureFilterMode
+    gridLightingTexture*: Texture3D
+    gridLightingInfo*: GridLightTextureInfo
+    gridLightingEnabled*: bool
     vertices: seq[Vertex3D]
     indices: seq[uint32]
     batches: seq[Batch3D]
@@ -77,8 +81,14 @@ type
     projection: Mat4
     view: Mat4
 
+  GridLightingUniforms = object
+    originCellSize: Vec4
+    gridSamples: Vec4
+    textureSize: Vec4
+
 const
   maxShaderTextureSlots = 8
+  gridLightSamplerSlot = maxShaderTextureSlots
   shaderDir = currentSourcePath.parentDir / "shaders"
 
 proc default3DVertexShaderPath*(): string =
@@ -94,6 +104,9 @@ proc identityMat4(): Mat4 =
   mat4()
 
 proc uniformsPointer(value: var FrameUniforms): pointer =
+  cast[pointer](addr value)
+
+proc lightingUniformsPointer(value: var GridLightingUniforms): pointer =
   cast[pointer](addr value)
 
 proc samplerInfoForFilter(
@@ -299,6 +312,12 @@ proc createPipeline(
       buffer_slot: 0,
       format: gpuVertexElementFormatFloat,
       offset: uint32(offsetof(Vertex3D, textureIndex))
+    ),
+    GPUVertexAttribute(
+      location: 5,
+      buffer_slot: 0,
+      format: gpuVertexElementFormatFloat3,
+      offset: uint32(offsetof(Vertex3D, lightingPosition))
     )
   ]
 
@@ -348,6 +367,9 @@ proc initArtist3D*(
   result.color = vec4(1'f32, 1'f32, 1'f32, 1'f32)
   result.normal = vec3(0'f32, 0'f32, 1'f32)
   result.filterMode = tfLinear
+  result.gridLightingTexture = nil
+  result.gridLightingInfo = default(GridLightTextureInfo)
+  result.gridLightingEnabled = false
 
   result.vertexShader = createShaderFromFile(
     device,
@@ -360,8 +382,8 @@ proc initArtist3D*(
     device,
     if config.fragmentShaderPath.len > 0: config.fragmentShaderPath else: default3DFragmentShaderPath(),
     gpuShaderStageFragment,
-    uint32(maxShaderTextureSlots),
-    0
+    uint32(maxShaderTextureSlots + 1),
+    1
   )
 
   result.vertexBuffer = createGPUBuffer(device, GPUBufferCreateInfo(
@@ -406,6 +428,9 @@ proc beginFrame*(artist: var Artist3D) =
   artist.normal = vec3(0'f32, 0'f32, 1'f32)
   artist.texture = nil
   artist.filterMode = tfLinear
+  artist.gridLightingTexture = nil
+  artist.gridLightingInfo = default(GridLightTextureInfo)
+  artist.gridLightingEnabled = false
 
 proc setProjection*(artist: var Artist3D; projection: Mat4) =
   artist.projection = projection
@@ -439,6 +464,24 @@ proc setNormal*(artist: var Artist3D; normal: Vec3) =
 proc setFilterMode*(artist: var Artist3D; filterMode: TextureFilterMode) =
   artist.filterMode = filterMode
 
+proc setGridLighting*(
+  artist: var Artist3D;
+  texture: Texture3D;
+  info: GridLightTextureInfo
+) =
+  artist.gridLightingTexture = texture
+  artist.gridLightingInfo = info
+  artist.gridLightingEnabled = not texture.isNil and
+    info.textureWidth > 0 and info.textureHeight > 0 and
+    info.gridWidth > 0 and info.gridHeight > 0 and
+    info.cellSize > 0'f32 and info.samplesPerCell > 0 and
+    info.blockStride > 0
+
+proc clearGridLighting*(artist: var Artist3D) =
+  artist.gridLightingTexture = nil
+  artist.gridLightingInfo = default(GridLightTextureInfo)
+  artist.gridLightingEnabled = false
+
 proc quad*(
   artist: var Artist3D;
   p0, p1, p2, p3: Vec3;
@@ -469,6 +512,7 @@ proc quad*(
     transformPoint(artist.model, p2),
     transformPoint(artist.model, p3)
   ]
+  let lightingPositions = [p0, p1, p2, p3]
   let quadUvs = [
     vec2(uvs.u0, uvs.v0),
     vec2(uvs.u1, uvs.v0),
@@ -482,7 +526,8 @@ proc quad*(
       uv: quadUvs[i],
       normal: worldNormal,
       color: resolvedColor,
-      textureIndex: cfloat(slot)
+      textureIndex: cfloat(slot),
+      lightingPosition: lightingPositions[i]
     ))
 
   artist.indices.add(base)
@@ -536,6 +581,18 @@ proc createTexture3D*(
   result = createGPUTexture(artist.device, textureInfo)
   uploadTexture2DData(artist.device, result, width, height, pixels, "artist3d texture upload")
   artist.registerTextureFilter(raw(result), filterMode)
+
+proc createGridLightTexture3D*(
+  artist: var Artist3D;
+  field: GridLightField
+): GPUTextureHandle {.gcsafe.} =
+  createTexture3D(
+    artist,
+    field.info.textureWidth,
+    field.info.textureHeight,
+    field.pixels,
+    tfLinear
+  )
 
 proc uploadGeometry(artist: var Artist3D; commandBuffer: ptr GPUCommandBuffer) =
   if artist.vertices.len <= 0 or artist.indices.len <= 0:
@@ -601,6 +658,35 @@ proc render*(
     uniformsPointer(uniforms),
     uint32(sizeof(uniforms))
   )
+  let lightingInfo = artist.gridLightingInfo
+  let lightingEnabled =
+    if artist.gridLightingEnabled and not artist.gridLightingTexture.isNil: 1'f32 else: 0'f32
+  var lightingUniforms = GridLightingUniforms(
+    originCellSize: vec4(
+      lightingInfo.originX,
+      lightingInfo.originZ,
+      lightingInfo.cellSize,
+      lightingEnabled
+    ),
+    gridSamples: vec4(
+      lightingInfo.gridWidth.float32,
+      lightingInfo.gridHeight.float32,
+      lightingInfo.samplesPerCell.float32,
+      lightingInfo.blockStride.float32
+    ),
+    textureSize: vec4(
+      lightingInfo.textureWidth.float32,
+      lightingInfo.textureHeight.float32,
+      if lightingInfo.textureWidth > 0: 1'f32 / lightingInfo.textureWidth.float32 else: 1'f32,
+      if lightingInfo.textureHeight > 0: 1'f32 / lightingInfo.textureHeight.float32 else: 1'f32
+    )
+  )
+  pushGPUFragmentUniformData(
+    commandBuffer,
+    0,
+    lightingUniformsPointer(lightingUniforms),
+    uint32(sizeof(lightingUniforms))
+  )
 
   var colorTarget = GPUColorTargetInfo(
     texture: targetTexture,
@@ -658,6 +744,15 @@ proc render*(
             raw(artist.linearSampler)
       )
     bindGPUFragmentSamplers(renderPass, 0, addr samplers[0], uint32(samplers.len))
+    var gridLightSampler = GPUTextureSamplerBinding(
+      texture:
+        if lightingEnabled > 0'f32:
+          artist.gridLightingTexture
+        else:
+          raw(artist.whiteTexture),
+      sampler: raw(artist.linearSampler)
+    )
+    bindGPUFragmentSamplers(renderPass, gridLightSamplerSlot, addr gridLightSampler, 1)
     drawGPUIndexedPrimitives(
       renderPass,
       batch.indexCount,
