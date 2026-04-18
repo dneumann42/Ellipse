@@ -80,6 +80,28 @@ suite "grid lighting":
 
     check field.cellSampleRgb(1, 1, 1, 1).x == 0'f32
 
+  test "shadow edge samples receive fractional visibility":
+    let config = baseConfig(3, 2)
+    let light = initGridLight(
+      0, 0,
+      vec3(1'f32, 0'f32, 0'f32),
+      radiusCells = 4'f32,
+      intensity = 1'f32,
+      falloff = 1'f32
+    )
+    let openField = buildGridLightField(config, [light], makeBlocker(@[]))
+    let shadowField = buildGridLightField(
+      config,
+      [light],
+      makeBlocker(@[(x: 1, y: 0, direction: gdE)])
+    )
+
+    let openSample = openField.cellSampleRgb(2, 1, 1, 0).x
+    let shadowSample = shadowField.cellSampleRgb(2, 1, 1, 0).x
+
+    check shadowSample > 0'f32
+    check shadowSample < openSample
+
   test "multiple tinted lights accumulate and clamp":
     let field = buildGridLightField(
       baseConfig(1, 1),

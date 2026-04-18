@@ -39,6 +39,7 @@ type
 
 const
   DefaultCellSize* = 1'f32
+  VisibilitySubsampleOffsets = [-1'f32, 0'f32, 1'f32]
 
 proc initGridLight*(
   cellX, cellY: int;
@@ -207,6 +208,21 @@ proc hasLineOfSight(
 
   x == targetX and y == targetY
 
+proc lineOfSightCoverage(
+  config: GridLightConfig;
+  blocker: WallBlocker;
+  ax, ay, bx, by, sampleStep: float32
+): float32 =
+  var visible = 0
+  var total = 0
+  for oy in VisibilitySubsampleOffsets:
+    for ox in VisibilitySubsampleOffsets:
+      inc total
+      if hasLineOfSight(config, blocker, ax, ay, bx + ox * sampleStep, by + oy * sampleStep):
+        inc visible
+
+  visible.float32 / total.float32
+
 proc writeCellGutters(
   values: var seq[Vec3];
   textureWidth, blockStride, cellX, cellY, samplesPerCell: int
@@ -281,6 +297,7 @@ proc buildGridLightField*(
     let lightY = light.cellY.float32 + 0.5'f32
     let radius = positive(light.radiusCells, 0.001'f32)
     let falloff = positive(light.falloff, 1'f32)
+    let visibilitySampleStep = 0.25'f32 / samples.float32
 
     for cellY in 0 ..< height:
       for cellX in 0 ..< width:
@@ -295,10 +312,20 @@ proc buildGridLightField*(
             let distance = sqrt(dx * dx + dy * dy)
             if distance > radius:
               continue
-            if not hasLineOfSight(normalizedConfig, blocker, lightX, lightY, sampleX, sampleY):
+            let visibility = lineOfSightCoverage(
+              normalizedConfig,
+              blocker,
+              lightX,
+              lightY,
+              sampleX,
+              sampleY,
+              visibilitySampleStep
+            )
+            if visibility <= 0'f32:
               continue
 
-            let amount = pow(max(0'f32, 1'f32 - distance / radius), falloff) * light.intensity
+            let amount = pow(max(0'f32, 1'f32 - distance / radius), falloff) *
+              light.intensity * visibility
             let px = cellX * blockStride + 1 + sx
             let py = cellY * blockStride + 1 + sy
             values[py * textureWidth + px] = values[py * textureWidth + px] + light.color * amount
