@@ -165,13 +165,13 @@ type
     deck: ControlDeck
 
 plugin Demo:
-  proc draw(
+  proc update(
     ui: var UI;
     deck: var ControlDeck;
-    swapchainWidth: uint32;
-    swapchainHeight: uint32
+    guiWidth: int;
+    guiHeight: int
   ) =
-    screenUi(swapchainWidth.int, swapchainHeight.int):
+    screenUi(guiWidth, guiHeight):
       controlDeck(deck)
 
 when isMainModule:

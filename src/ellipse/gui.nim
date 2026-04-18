@@ -233,8 +233,43 @@ proc initGuiContext*(): GuiContext =
   result.ui.onDraw = drawGuiElement
   result.ui.onMeasureText = measureGuiText
 
-proc beginFrame*(gui: var GuiContext) =
+proc beginFrame*(gui: var GuiContext; measureArtist: var Artist2D) =
+  gActiveArtist = addr measureArtist
+  gFontSize = measureArtist.defaultFontSize.int
   gui.ui.begin()
+
+proc update*(
+  gui: var GuiContext;
+  width: int;
+  height: int;
+  deltaTime: float
+) =
+  try:
+    gui.ui.updateWidgets(deltaTime)
+    gui.ui.updateLayout((x: 0, y: 0, w: width, h: height))
+  finally:
+    gActiveArtist = nil
+
+proc draw*(
+  gui: var GuiContext;
+  artist: var Artist2D;
+  width: int;
+  height: int;
+  renderScale: cfloat = 1'f32
+) =
+  gActiveArtist = addr artist
+  gFontSize = artist.defaultFontSize.int
+  gTargetClip = ScissorRect(x: 0, y: 0, w: width, h: height)
+  gClipStack.setLen(0)
+  gRenderScale = max(renderScale, 1'f32)
+  artist.clearScissor()
+  try:
+    gui.ui.draw()
+  finally:
+    artist.clearScissor()
+    gClipStack.setLen(0)
+    gRenderScale = 1'f32
+    gActiveArtist = nil
 
 proc render*(
   gui: var GuiContext;
@@ -246,19 +281,8 @@ proc render*(
 ) =
   gActiveArtist = addr artist
   gFontSize = artist.defaultFontSize.int
-  gTargetClip = ScissorRect(x: 0, y: 0, w: width, h: height)
-  gClipStack.setLen(0)
-  gRenderScale = max(renderScale, 1'f32)
-  artist.clearScissor()
-  try:
-    gui.ui.updateWidgets(deltaTime)
-    gui.ui.updateLayout((x: 0, y: 0, w: width, h: height))
-    gui.ui.draw()
-  finally:
-    artist.clearScissor()
-    gClipStack.setLen(0)
-    gRenderScale = 1'f32
-    gActiveArtist = nil
+  gui.update(width, height, deltaTime)
+  gui.draw(artist, width, height, renderScale)
 
 proc clearTransientInput*(gui: var GuiContext) =
   gui.ui.input.scrollY = 0

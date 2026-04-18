@@ -131,6 +131,18 @@ proc normalizedWindowPosition[T, A](
 
   (x: int(x), y: int(y))
 
+proc currentGuiSize[T, A](app: ref Application[T, A]): tuple[w, h: int] =
+  var pixelWidth: cint
+  var pixelHeight: cint
+  if getWindowSizeInPixels(raw(app.context.window), addr pixelWidth, addr pixelHeight) and
+      pixelWidth > 0 and pixelHeight > 0:
+    return (w: pixelWidth.int, h: pixelHeight.int)
+
+  (
+    w: max(app.config.width, 1),
+    h: max(app.config.height, 1)
+  )
+
 template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInputs: Input[A]): untyped =
   var gApplication {.global.}: ref Application[T, A]
 
@@ -264,6 +276,7 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
       scenes {.inject.} = gApplication.scenes
       pluginStates {.inject.} = gApplication.pluginStates
       messages {.inject.} = gApplication.messages
+      resources {.inject.} = gApplication.resources
       inputs {.inject.} = gApplication.inputs
       quit {.inject.} = gApplication.quitRequested
     template window: untyped {.inject, used.} = raw(gApplication.context.window)
@@ -284,6 +297,7 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
     gApplication.scenes = scenes
     gApplication.pluginStates = pluginStates
     gApplication.messages = messages
+    gApplication.resources = resources
     gApplication.inputs = inputs
     gApplication.quitRequested = quit
 
@@ -298,6 +312,7 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
       scenes {.inject.} = app.scenes
       pluginStates {.inject.} = app.pluginStates
       messages {.inject.} = app.messages
+      resources {.inject.} = app.resources
       inputs {.inject.} = app.inputs
       quit {.inject.} = app.quitRequested
     template window: untyped {.inject, used.} = raw(app.context.window)
@@ -308,22 +323,33 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
     template artist3D: untyped {.inject, used.} = app.artist3D
     template deltaSeconds: untyped {.inject, used.} = app.deltaSeconds
 
+    let guiSize = app.currentGuiSize()
     scenes.startFrame()
     scenes.handlePushed()
+    app.gui.beginFrame(app.artist)
 
     withFields(app.state, app):
       try:
         generatePluginStep(loadScene)
         generateListenStep(messages)
+        template ui: untyped {.inject, used.} = app.gui.ui
+        template guiWidth: untyped {.inject, used.} = guiSize.w
+        template guiHeight: untyped {.inject, used.} = guiSize.h
         generatePluginStep(update)
         generatePluginStep(alwaysUpdate)
       except CatchableError as err:
         reportException("application update failed", err)
         return appFailure
 
+    if scenes.sceneChanged():
+      app.gui.beginFrame(app.artist)
+
+    app.gui.update(guiSize.w, guiSize.h, app.deltaSeconds)
+
     app.scenes = scenes
     app.pluginStates = pluginStates
     app.messages = messages
+    app.resources = resources
     app.inputs = inputs
     app.inputs.lateUpdate()
     app.quitRequested = quit
@@ -375,10 +401,10 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
       return appFailure
 
     block:
-      app.gui.beginFrame()
       var
         pluginStates {.inject.} = app.pluginStates
         messages {.inject.} = app.messages
+        resources {.inject.} = app.resources
         inputs {.inject.} = app.inputs
         scenes {.inject.} = app.scenes
         quit {.inject.} = app.quitRequested
@@ -388,7 +414,6 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
       template artist: untyped {.inject, used.} =
         currentArtistPtr(app.canvasManager, addr app.artist)[]
       template artist3D: untyped {.inject, used.} = app.artist3D
-      template ui: untyped {.inject, used.} = app.gui.ui
       template swapchainWidth: untyped {.inject, used.} = swapchainWidth
       template swapchainHeight: untyped {.inject, used.} = swapchainHeight
 
@@ -403,6 +428,7 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
 
       app.pluginStates = pluginStates
       app.messages = messages
+      app.resources = resources
       app.inputs = inputs
       app.scenes = scenes
       app.quitRequested = quit
@@ -410,11 +436,10 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
     try:
       sortForRendering(app.canvasManager)
       withCanvas(app.canvasManager, app.artist, guiCanvasId):
-        app.gui.render(
+        app.gui.draw(
           artist,
           swapchainWidth.int,
           swapchainHeight.int,
-          app.deltaSeconds,
           defaultGuiSupersampleScale.cfloat
         )
       renderCanvases(app.canvasManager, commandBuffer)

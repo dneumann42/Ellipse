@@ -26,6 +26,17 @@ proc baseConfig(width, height: int): GridLightConfig =
     maxBrightness: 1'f32
   )
 
+proc ambientConfig(width, height: int): GridLightConfig =
+  GridLightConfig(
+    width: width,
+    height: height,
+    cellSize: 1'f32,
+    samplesPerCell: 4,
+    ambient: vec3(0.25'f32, 0.25'f32, 0.25'f32),
+    maxBrightness: 1'f32,
+    shadowBlackPoint: 0.24'f32
+  )
+
 suite "grid lighting":
   test "light reaches open neighboring cells":
     let field = buildGridLightField(
@@ -92,6 +103,23 @@ suite "grid lighting":
     )
 
     check field.cellSampleRgb(0, 0, 2, 2) == vec3(0'f32, 0'f32, 0'f32)
+
+  test "shadow black point compresses ambient without dimming bright light":
+    let field = buildGridLightField(
+      ambientConfig(2, 1),
+      [
+        initGridLight(
+          0, 0,
+          vec3(1'f32, 1'f32, 1'f32),
+          radiusCells = 2'f32,
+          intensity = 2'f32
+        )
+      ],
+      makeBlocker(@[(x: 0, y: 0, direction: gdE)])
+    )
+
+    check field.cellSampleRgb(1, 0, 2, 2).x < 0.03'f32
+    check field.cellSampleRgb(0, 0, 2, 2) == vec3(1'f32, 1'f32, 1'f32)
 
   test "cell gutters duplicate edge samples":
     let field = buildGridLightField(

@@ -23,6 +23,7 @@ type
     samplesPerCell*: int
     ambient*: Vec3
     maxBrightness*: float32
+    shadowBlackPoint*: float32
 
   GridLightTextureInfo* = object
     originX*, originZ*: float32
@@ -67,6 +68,13 @@ proc positive(value, fallback: float32): float32 =
 
 proc positive(value, fallback: int): int =
   if value > 0: value else: fallback
+
+proc applyBlackPoint(value, blackPoint: float32): float32 =
+  let point = min(0.95'f32, max(0'f32, blackPoint))
+  if point <= 0'f32:
+    clamp01(value)
+  else:
+    clamp01((value - point) / (1'f32 - point))
 
 proc inBounds(width, height, x, y: int): bool =
   x >= 0 and x < width and y >= 0 and y < height
@@ -243,7 +251,8 @@ proc buildGridLightField*(
     cellSize: positive(config.cellSize, DefaultCellSize),
     samplesPerCell: samples,
     ambient: config.ambient,
-    maxBrightness: positive(config.maxBrightness, 1'f32)
+    maxBrightness: positive(config.maxBrightness, 1'f32),
+    shadowBlackPoint: config.shadowBlackPoint
   )
 
   result.info = GridLightTextureInfo(
@@ -301,9 +310,15 @@ proc buildGridLightField*(
   result.pixels = newSeq[uint8](textureWidth * textureHeight * 4)
   for i, value in values:
     let base = i * 4
-    result.pixels[base] = uint8(round(clamp01(value.x / normalizedConfig.maxBrightness) * 255'f32))
-    result.pixels[base + 1] = uint8(round(clamp01(value.y / normalizedConfig.maxBrightness) * 255'f32))
-    result.pixels[base + 2] = uint8(round(clamp01(value.z / normalizedConfig.maxBrightness) * 255'f32))
+    result.pixels[base] = uint8(round(
+      applyBlackPoint(value.x / normalizedConfig.maxBrightness, normalizedConfig.shadowBlackPoint) * 255'f32
+    ))
+    result.pixels[base + 1] = uint8(round(
+      applyBlackPoint(value.y / normalizedConfig.maxBrightness, normalizedConfig.shadowBlackPoint) * 255'f32
+    ))
+    result.pixels[base + 2] = uint8(round(
+      applyBlackPoint(value.z / normalizedConfig.maxBrightness, normalizedConfig.shadowBlackPoint) * 255'f32
+    ))
     result.pixels[base + 3] = 255'u8
 
 proc pixelRgb*(field: GridLightField; x, y: int): Vec3 =
