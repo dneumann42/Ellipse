@@ -88,14 +88,22 @@ proc rgbaPixels(surface: ptr Surface): seq[uint8] =
       return @[]
     result = newSeq[uint8](width * height * 4)
     let srcPitch = int(surface.pitch)
-    let rowBytes = width * 4
     let srcBase = cast[ptr UncheckedArray[uint8]](surface.pixels)
     for y in 0 ..< height:
-      copyMem(
-        addr result[y * rowBytes],
-        cast[pointer](cast[uint](srcBase) + uint(y * srcPitch)),
-        rowBytes
-      )
+      let srcRow = cast[ptr UncheckedArray[uint8]](cast[pointer](cast[uint](srcBase) + uint(y * srcPitch)))
+      for x in 0 ..< width:
+        let srcOffset = x * 4
+        let dstOffset = (y * width + x) * 4
+        when cpuEndian == littleEndian:
+          result[dstOffset] = srcRow[srcOffset + 3]
+          result[dstOffset + 1] = srcRow[srcOffset + 2]
+          result[dstOffset + 2] = srcRow[srcOffset + 1]
+          result[dstOffset + 3] = srcRow[srcOffset]
+        else:
+          result[dstOffset] = srcRow[srcOffset]
+          result[dstOffset + 1] = srcRow[srcOffset + 1]
+          result[dstOffset + 2] = srcRow[srcOffset + 2]
+          result[dstOffset + 3] = srcRow[srcOffset + 3]
   finally:
     SDL3ext.unlockSurface(surface)
 
@@ -120,14 +128,22 @@ proc savePngRgba*(path: string; image: RgbaImage) =
   SDL3ext.lockSurface(surface)
   try:
     let dstPitch = int(raw(surface).pitch)
-    let rowBytes = image.width * 4
     let dstBase = cast[ptr UncheckedArray[uint8]](raw(surface).pixels)
     for y in 0 ..< image.height:
-      copyMem(
-        cast[pointer](cast[uint](dstBase) + uint(y * dstPitch)),
-        unsafeAddr image.pixels[y * rowBytes],
-        rowBytes
-      )
+      let dstRow = cast[ptr UncheckedArray[uint8]](cast[pointer](cast[uint](dstBase) + uint(y * dstPitch)))
+      for x in 0 ..< image.width:
+        let srcOffset = (y * image.width + x) * 4
+        let dstOffset = x * 4
+        when cpuEndian == littleEndian:
+          dstRow[dstOffset] = image.pixels[srcOffset + 3]
+          dstRow[dstOffset + 1] = image.pixels[srcOffset + 2]
+          dstRow[dstOffset + 2] = image.pixels[srcOffset + 1]
+          dstRow[dstOffset + 3] = image.pixels[srcOffset]
+        else:
+          dstRow[dstOffset] = image.pixels[srcOffset]
+          dstRow[dstOffset + 1] = image.pixels[srcOffset + 1]
+          dstRow[dstOffset + 2] = image.pixels[srcOffset + 2]
+          dstRow[dstOffset + 3] = image.pixels[srcOffset + 3]
   finally:
     SDL3ext.unlockSurface(surface)
   SDL3ext.savePng(surface, path)

@@ -60,6 +60,27 @@ suite "atlas":
     check not rgba(2, 2, [uint8(1), 2, 3, 255]).isTransparent()
     check rgba(2, 2, [uint8(1), 2, 3, 128]).isTransparent()
 
+  test "PNG helpers preserve RGBA channel order":
+    let dir = fixtureDir("rgba")
+    createDir(dir)
+    defer: removeDir(dir)
+
+    let image = RgbaImage(
+      width: 2,
+      height: 1,
+      pixels: @[
+        uint8(12), 34, 56, 78,
+        uint8(210), 180, 90, 240
+      ]
+    )
+    let path = dir / "pixels.png"
+    savePngRgba(path, image)
+    let loaded = loadPngRgba(path)
+
+    check loaded.width == image.width
+    check loaded.height == image.height
+    check loaded.pixels == image.pixels
+
   test "generates tile atlas with TOML order and coordinates":
     let dir = fixtureDir("tiles")
     let input = dir / "input"
@@ -78,6 +99,7 @@ suite "atlas":
 
     generateTileAtlas(input, outPath, atlasWidth = 4, atlasHeight = 4)
     let meta = readTileAtlasMeta(atlasMetaPath(outPath))
+    let pixels = loadPngRgba(outPath)
     check meta.tiles.len == 2
     check meta.tiles[0].name == "b.png"
     check meta.tiles[0].x == 0
@@ -87,6 +109,8 @@ suite "atlas":
     check meta.tiles[1].x == 2
     check meta.tiles[1].y == 0
     check fileExists(outPath)
+    check pixels.pixels[0 .. 3] == @[uint8(0), 255, 0, 128]
+    check pixels.pixels[8 .. 11] == @[uint8(255), 0, 0, 255]
 
   test "sorts sprites by area and reports atlas overflow":
     let dir = fixtureDir("sprites")
@@ -101,9 +125,12 @@ suite "atlas":
     let outPath = dir / "sprites.png"
     generateSpriteAtlas(input, outPath, atlasWidth = 4, atlasHeight = 4)
     let meta = readSpriteAtlasMeta(atlasMetaPath(outPath))
+    let pixels = loadPngRgba(outPath)
     check meta.sprites.len == 2
     check meta.sprites[0].name == "big.png"
     check meta.sprites[1].name == "small.png"
+    check pixels.pixels[0 .. 3] == @[uint8(255), 255, 0, 255]
+    check pixels.pixels[8 .. 11] == @[uint8(0), 0, 255, 255]
 
     savePngRgba(input / "too-wide.png", rgba(5, 1, [uint8(255), 255, 255, 255]))
     expect AtlasError:

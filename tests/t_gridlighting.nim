@@ -152,3 +152,42 @@ suite "grid lighting":
 
     check field.pixelRgb(0, 1) == field.pixelRgb(1, 1)
     check field.pixelRgb(field.info.blockStride - 1, 1) == field.pixelRgb(field.info.blockStride - 2, 1)
+
+  test "environment sampler supplies ambient per cell":
+    let field = buildGridLightField(
+      baseConfig(2, 1),
+      [],
+      makeBlocker(@[]),
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellY
+        GridEnvironmentSample(
+          ambient:
+            if cellX < 1'f32:
+              vec3(0.25'f32, 0'f32, 0'f32)
+            else:
+              vec3(0'f32, 0'f32, 0.5'f32)
+        )
+    )
+
+    check field.cellSampleRgb(0, 0, 1, 1).x > 0.2'f32
+    check field.cellSampleRgb(1, 0, 1, 1).z > 0.45'f32
+
+  test "directional sun is blocked by grid walls":
+    let field = buildGridLightField(
+      baseConfig(3, 1),
+      [],
+      makeBlocker(@[(x: 1, y: 0, direction: gdE)]),
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellX
+        discard cellY
+        GridEnvironmentSample(
+          ambient: vec3(0'f32, 0'f32, 0'f32),
+          sunDirection: vec3(1'f32, -1'f32, 0'f32),
+          sunColor: vec3(1'f32, 1'f32, 1'f32),
+          sunIntensity: 1'f32,
+          sunEnabled: true
+        )
+    )
+
+    check field.cellSampleRgb(0, 0, 1, 1).x > 0.9'f32
+    check field.cellSampleRgb(2, 0, 1, 1).x == 0'f32

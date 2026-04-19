@@ -17,6 +17,7 @@ layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec4 fragColor;
 layout(location = 3) flat out int fragTextureIndex;
 layout(location = 4) out vec3 fragLightingPosition;
+layout(location = 5) out vec3 fragWorldPosition;
 
 void main() {
   fragUv = inUv;
@@ -24,5 +25,6 @@ void main() {
   fragColor = inColor;
   fragTextureIndex = int(inTextureIndex + 0.5);
   fragLightingPosition = inLightingPosition;
+  fragWorldPosition = inPosition;
   gl_Position = frameUniforms.projection * frameUniforms.view * vec4(inPosition, 1.0);
 }

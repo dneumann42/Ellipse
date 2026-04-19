@@ -196,8 +196,9 @@ proc createDepthTexturedPipeline*(
   vertexAttributes: ptr GPUVertexAttribute,
   numVertexAttributes: uint32
 ): GPUGraphicsPipelineHandle =
-  ## Creates the default opaque 3D textured pipeline with depth test/write.
-  var colorTarget = createColorTargetDescription(swapchainFormat, false)
+  ## Creates the default 3D textured pipeline with depth test/write.
+  ## Alpha blending is enabled so editor overlays can render translucent volumes.
+  var colorTarget = createColorTargetDescription(swapchainFormat, true)
 
   let pipelineInfo = GPUGraphicsPipelineCreateInfo(
     vertex_shader: raw(vertexShader),

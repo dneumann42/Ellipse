@@ -58,6 +58,11 @@ type
     gridLightingTexture*: Texture3D
     gridLightingInfo*: GridLightTextureInfo
     gridLightingEnabled*: bool
+    environmentClearEnabled*: bool
+    environmentClearColor*: FColor
+    fogTint*: Vec3
+    fogDensity*: float32
+    cameraPosition*: Vec3
     vertices: seq[Vertex3D]
     indices: seq[uint32]
     batches: seq[Batch3D]
@@ -85,6 +90,8 @@ type
     originCellSize: Vec4
     gridSamples: Vec4
     textureSize: Vec4
+    fogTintDensity: Vec4
+    cameraPosition: Vec4
 
 const
   maxShaderTextureSlots = 8
@@ -370,6 +377,11 @@ proc initArtist3D*(
   result.gridLightingTexture = nil
   result.gridLightingInfo = default(GridLightTextureInfo)
   result.gridLightingEnabled = false
+  result.environmentClearEnabled = false
+  result.environmentClearColor = default(FColor)
+  result.fogTint = vec3(0'f32, 0'f32, 0'f32)
+  result.fogDensity = 0'f32
+  result.cameraPosition = vec3(0'f32, 0'f32, 0'f32)
 
   result.vertexShader = createShaderFromFile(
     device,
@@ -431,6 +443,11 @@ proc beginFrame*(artist: var Artist3D) =
   artist.gridLightingTexture = nil
   artist.gridLightingInfo = default(GridLightTextureInfo)
   artist.gridLightingEnabled = false
+  artist.environmentClearEnabled = false
+  artist.environmentClearColor = default(FColor)
+  artist.fogTint = vec3(0'f32, 0'f32, 0'f32)
+  artist.fogDensity = 0'f32
+  artist.cameraPosition = vec3(0'f32, 0'f32, 0'f32)
 
 proc setProjection*(artist: var Artist3D; projection: Mat4) =
   artist.projection = projection
@@ -481,6 +498,19 @@ proc clearGridLighting*(artist: var Artist3D) =
   artist.gridLightingTexture = nil
   artist.gridLightingInfo = default(GridLightTextureInfo)
   artist.gridLightingEnabled = false
+
+proc setEnvironment*(
+  artist: var Artist3D;
+  clearColor: Vec3;
+  fogTint: Vec3;
+  fogDensity: float32;
+  cameraPosition: Vec3
+) =
+  artist.environmentClearEnabled = true
+  artist.environmentClearColor = FColor(r: clearColor.x, g: clearColor.y, b: clearColor.z, a: 1'f32)
+  artist.fogTint = fogTint
+  artist.fogDensity = max(0'f32, fogDensity)
+  artist.cameraPosition = cameraPosition
 
 proc quadWithLightingPositions*(
   artist: var Artist3D;
@@ -697,7 +727,14 @@ proc render*(
       lightingInfo.textureHeight.float32,
       if lightingInfo.textureWidth > 0: 1'f32 / lightingInfo.textureWidth.float32 else: 1'f32,
       if lightingInfo.textureHeight > 0: 1'f32 / lightingInfo.textureHeight.float32 else: 1'f32
-    )
+    ),
+    fogTintDensity: vec4(
+      artist.fogTint.x,
+      artist.fogTint.y,
+      artist.fogTint.z,
+      artist.fogDensity
+    ),
+    cameraPosition: vec4(artist.cameraPosition.x, artist.cameraPosition.y, artist.cameraPosition.z, 1'f32)
   )
   pushGPUFragmentUniformData(
     commandBuffer,
@@ -710,7 +747,11 @@ proc render*(
     texture: targetTexture,
     mip_level: 0,
     layer_or_depth_plane: 0,
-    clear_color: clearColor,
+    clear_color:
+      if artist.environmentClearEnabled:
+        artist.environmentClearColor
+      else:
+        clearColor,
     load_op: gpuLoadOpClear,
     store_op: gpuStoreOpStore,
     resolve_texture: nil,

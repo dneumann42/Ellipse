@@ -8,6 +8,15 @@ type
 
   WallBlocker* = proc(x, y: int; direction: GridDirection): bool {.closure, gcsafe.}
 
+  GridEnvironmentSample* = object
+    ambient*: Vec3
+    sunDirection*: Vec3
+    sunColor*: Vec3
+    sunIntensity*: float32
+    sunEnabled*: bool
+
+  GridEnvironmentSampler* = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.}
+
   GridLight* = object
     cellX*, cellY*: int
     height*: float32
@@ -223,6 +232,87 @@ proc lineOfSightCoverage(
 
   visible.float32 / total.float32
 
+proc sunVisibility(
+  config: GridLightConfig;
+  blocker: WallBlocker;
+  sampleX, sampleY: float32;
+  sunDirection: Vec3
+): float32 =
+  let toSunX = -sunDirection.x
+  let toSunY = -sunDirection.z
+  if abs(toSunX) <= 0.000001'f32 and abs(toSunY) <= 0.000001'f32:
+    return 1'f32
+
+  var x = int(floor(sampleX))
+  var y = int(floor(sampleY))
+  if not inBounds(config.width, config.height, x, y):
+    return 1'f32
+
+  let stepX = if toSunX > 0'f32: 1 elif toSunX < 0'f32: -1 else: 0
+  let stepY = if toSunY > 0'f32: 1 elif toSunY < 0'f32: -1 else: 0
+  var tMaxX =
+    if stepX == 0:
+      Inf.float32
+    else:
+      let nextBoundary = if stepX > 0: floor(sampleX) + 1'f32 else: floor(sampleX)
+      abs((nextBoundary - sampleX) / toSunX)
+  var tMaxY =
+    if stepY == 0:
+      Inf.float32
+    else:
+      let nextBoundary = if stepY > 0: floor(sampleY) + 1'f32 else: floor(sampleY)
+      abs((nextBoundary - sampleY) / toSunY)
+  let tDeltaX = if stepX == 0: Inf.float32 else: abs(1'f32 / toSunX)
+  let tDeltaY = if stepY == 0: Inf.float32 else: abs(1'f32 / toSunY)
+
+  var guard = 0
+  while guard < config.width * config.height * 2:
+    inc guard
+    if abs(tMaxX - tMaxY) <= 0.00001'f32:
+      let dirX = if stepX > 0: gdE else: gdW
+      let dirY = if stepY > 0: gdS else: gdN
+      if not inBounds(config.width, config.height, x + stepX, y) or
+          not inBounds(config.width, config.height, x, y + stepY):
+        return 1'f32
+      if blocked(blocker, config.width, config.height, x, y, dirX) or
+          blocked(blocker, config.width, config.height, x, y, dirY):
+        return 0'f32
+      x += stepX
+      y += stepY
+      tMaxX += tDeltaX
+      tMaxY += tDeltaY
+    elif tMaxX < tMaxY:
+      let dirX = if stepX > 0: gdE else: gdW
+      if not inBounds(config.width, config.height, x + stepX, y):
+        return 1'f32
+      if blocked(blocker, config.width, config.height, x, y, dirX):
+        return 0'f32
+      x += stepX
+      tMaxX += tDeltaX
+    else:
+      let dirY = if stepY > 0: gdS else: gdN
+      if not inBounds(config.width, config.height, x, y + stepY):
+        return 1'f32
+      if blocked(blocker, config.width, config.height, x, y, dirY):
+        return 0'f32
+      y += stepY
+      tMaxY += tDeltaY
+
+    if not inBounds(config.width, config.height, x, y):
+      return 1'f32
+
+  1'f32
+
+proc sampleEnvironment(
+  config: GridLightConfig;
+  environmentSampler: GridEnvironmentSampler;
+  cellX, cellY: float32
+): GridEnvironmentSample =
+  if environmentSampler.isNil:
+    GridEnvironmentSample(ambient: config.ambient)
+  else:
+    environmentSampler(cellX, cellY)
+
 proc writeCellGutters(
   values: var seq[Vec3];
   textureWidth, blockStride, cellX, cellY, samplesPerCell: int
@@ -253,7 +343,8 @@ proc buildGridLightField*(
   lights: openArray[GridLight];
   blocker: WallBlocker;
   originX = 0'f32;
-  originZ = 0'f32
+  originZ = 0'f32;
+  environmentSampler: GridEnvironmentSampler = nil
 ): GridLightField =
   let width = positive(config.width, 1)
   let height = positive(config.height, 1)
@@ -284,8 +375,21 @@ proc buildGridLightField*(
   )
 
   var values = newSeq[Vec3](textureWidth * textureHeight)
-  for i in 0 ..< values.len:
-    values[i] = normalizedConfig.ambient
+  for cellY in 0 ..< height:
+    for cellX in 0 ..< width:
+      for sy in 0 ..< samples:
+        for sx in 0 ..< samples:
+          let sampleX = cellX.float32 + (sx.float32 + 0.5'f32) / samples.float32
+          let sampleY = cellY.float32 + (sy.float32 + 0.5'f32) / samples.float32
+          let environment = normalizedConfig.sampleEnvironment(environmentSampler, sampleX, sampleY)
+          var value = environment.ambient
+          if environment.sunEnabled and environment.sunIntensity > 0'f32:
+            let visibility = normalizedConfig.sunVisibility(blocker, sampleX, sampleY, environment.sunDirection)
+            if visibility > 0'f32:
+              value = value + environment.sunColor * environment.sunIntensity * visibility
+          let px = cellX * blockStride + 1 + sx
+          let py = cellY * blockStride + 1 + sy
+          values[py * textureWidth + px] = value
 
   for light in lights:
     if not light.enabled or light.radiusCells <= 0'f32 or light.intensity <= 0'f32:
