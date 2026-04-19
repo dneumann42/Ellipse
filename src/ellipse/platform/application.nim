@@ -390,6 +390,18 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
     if swapchainTexture.isNil:
       return if submitGPUCommandBuffer(commandBuffer): appContinue else: appFailure
 
+    try:
+      resizeCanvas(
+        app.canvasManager,
+        guiCanvasId,
+        swapchainWidth.int * defaultGuiSupersampleScale,
+        swapchainHeight.int * defaultGuiSupersampleScale
+      )
+    except CatchableError as err:
+      reportException("application canvas resize failed", err)
+      discard cancelGPUCommandBuffer(commandBuffer)
+      return appFailure
+
     beginFrame(app.artist)
     beginFrame(app.artist3D)
     beginFrame(app.canvasManager)

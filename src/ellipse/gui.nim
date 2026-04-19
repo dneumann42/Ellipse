@@ -6,6 +6,7 @@ import chroma
 import std/macros
 import std/math
 import std/strutils
+import std/tables
 
 import ./rendering/artist2D
 
@@ -29,10 +30,20 @@ type
     boxClip: ScissorRect
     childClip: ScissorRect
 
+  GuiImage* = object
+    texture*: SpriteTexture
+    region*: SpriteTextureRegion
+    tint*: array[4, cfloat]
+
+  ImageGridItem* = object
+    texture*: SpriteTexture
+    region*: SpriteTextureRegion
+
 var gActiveArtist {.threadvar.}: ptr Artist2D
 var gFontSize {.threadvar.}: int
 var gTargetClip {.threadvar.}: ScissorRect
 var gClipStack {.threadvar.}: seq[GuiClipState]
+var gImages {.threadvar.}: Table[string, GuiImage]
 var gRenderScale {.threadvar.}: cfloat
 
 template activeArtist: untyped =
@@ -191,6 +202,41 @@ proc drawTextContent(elem: Elem; clip: ScissorRect) =
   let tint = colorToTint(elem.style.fg)
   discard activeArtist.drawText(elem.text, textPos, tint, gRenderScale)
 
+proc drawImageContent(elem: Elem; clip: ScissorRect) =
+  if gActiveArtist.isNil or clip.w <= 0 or clip.h <= 0:
+    return
+  let key = $elem.id
+  if not gImages.hasKey(key):
+    return
+
+  let image = gImages[key]
+  if image.texture.isNil:
+    return
+
+  let padding = elem.style.padding
+  let contentX = elem.box.x + padding
+  let contentY = elem.box.y + padding
+  let contentW = max(elem.box.w - padding * 2, 0)
+  let contentH = max(elem.box.h - padding * 2, 0)
+  let side = min(contentW, contentH)
+  if side <= 0:
+    return
+
+  var sprite = initSprite2D()
+  sprite.position = [
+    scaled(contentX + max((contentW - side) div 2, 0)),
+    scaled(contentY + max((contentH - side) div 2, 0))
+  ]
+  sprite.size = [scaled(side), scaled(side)]
+  sprite.origin = [0'f32, 0'f32]
+  sprite.texture = image.texture
+  sprite.region = image.region
+  sprite.hasRegion = true
+  sprite.tint = image.tint
+  sprite.filterMode = tfNearest
+  sprite.hasFilterOverride = true
+  discard activeArtist.drawSprite(sprite)
+
 proc drawScrollIndicator(elem: Elem; clip: ScissorRect) =
   if elem.scrollThumbHeight <= 0 or clip.w <= 0 or clip.h <= 0:
     return
@@ -218,6 +264,8 @@ proc drawGuiElement(elem: Elem; phase: DrawPhase) {.gcsafe.} =
     applyGuiClip(clipState.boxClip)
     drawBackground(elem, clipState.boxClip)
     drawBorder(elem, clipState.boxClip)
+    applyGuiClip(clipState.boxClip)
+    drawImageContent(elem, clipState.boxClip)
     applyGuiClip(clipState.inheritedClip)
     drawTextContent(elem, clipState.inheritedClip)
   of AfterChildren:
@@ -236,6 +284,7 @@ proc initGuiContext*(): GuiContext =
 proc beginFrame*(gui: var GuiContext; measureArtist: var Artist2D) =
   gActiveArtist = addr measureArtist
   gFontSize = measureArtist.defaultFontSize.int
+  gImages = initTable[string, GuiImage]()
   gui.ui.begin()
 
 proc update*(
@@ -391,16 +440,16 @@ template panel*(title: string; panelId: ElemId; body: untyped) =
     align = Start
     crossAlign = Start
     style = style(
-      bg = color(0.08, 0.10, 0.16, 0.92),
-      borderColor = color(0.94, 0.67, 0.22, 0.95),
-      border = 2,
-      padding = 14,
-      gap = 12
+      bg = ui.theme.panel.bg,
+      borderColor = ui.theme.panel.border,
+      border = ui.theme.panel.borderWidth,
+      padding = ui.theme.panel.padding,
+      gap = ui.theme.panel.gap
     )
     shui.elem:
       text = title
       style = style(
-        fg = color(0.97, 0.86, 0.42, 1.0)
+        fg = ui.theme.panel.titleFg
       )
       size = (w: FitSize, h: FitSize)
     body
@@ -413,7 +462,7 @@ template label*(caption: string) =
   shui.elem:
     text = caption
     style = style(
-      fg = color(0.95, 0.96, 0.99, 1.0)
+      fg = ui.theme.textFg
     )
     size = (w: FitSize, h: FitSize)
 
@@ -442,37 +491,38 @@ macro button*(text: string; id: ElemId; body: untyped): untyped =
     ui.registerWidget(`id`)
     `onClick`
     block:
+      let theme = ui.theme.button
       var bgCol =
         if `id`.hot(ui) or `toggleCheck`:
-          color(0.90, 0.62, 0.18)
+          theme.hotBg
         else:
-          color(0.73, 0.48, 0.12)
-      var fgCol = color(0.08, 0.08, 0.12)
+          theme.bg
+      var fgCol = theme.fg
       var borderCol =
         if `id`.hot(ui) or `toggleCheck`:
-          color(1.0, 0.82, 0.40)
+          theme.hotBorder
         else:
-          color(0.94, 0.67, 0.22)
+          theme.border
       if `id`.down(ui):
-        bgCol = color(1.0, 0.78, 0.28)
-        borderCol = color(1.0, 0.90, 0.56)
+        bgCol = theme.downBg
+        borderCol = theme.downBorder
       if config.disabled:
-        bgCol = color(0.22, 0.19, 0.14)
-        fgCol = color(0.62, 0.58, 0.50)
-        borderCol = color(0.42, 0.35, 0.22)
+        bgCol = theme.disabledBg
+        fgCol = theme.disabledFg
+        borderCol = theme.disabledBorder
       shui.elem:
         id = `id`
         style = Style(
           fg: fgCol,
           bg: bgCol,
           borderColor: borderCol,
-          border: 2,
-          padding: 7,
-          borderRadius: 10.0,
+          border: theme.borderWidth,
+          padding: theme.padding,
+          borderRadius: theme.borderRadius,
         )
         size = (
-          w: Sizing(kind: Fit, min: 72, max: 240),
-          h: Sizing(kind: Fixed, min: 34, max: 34)
+          w: Sizing(kind: Fit, min: theme.minWidth, max: theme.maxWidth),
+          h: Sizing(kind: Fixed, min: theme.height, max: theme.height)
         )
         dir = Row
         align = Center
@@ -494,14 +544,14 @@ template checkbox*(caption: string; value: var bool; widgetId: ElemId) =
     let active = value
     let rowBg =
       if widgetId.down(ui):
-        color(0.16, 0.16, 0.34)
+        ui.theme.list.rowDownBg
       elif widgetId.hot(ui):
-        color(0.10, 0.10, 0.24)
+        ui.theme.list.rowHotBg
       else:
         color(0.0, 0.0, 0.0, 0.0)
     let boxBg =
-      if active: color(0.95, 0.72, 0.24)
-      else: color(0.12, 0.12, 0.22)
+      if active: ui.theme.accentHot
+      else: ui.theme.input.bg
 
     shui.elem:
       id = widgetId
@@ -513,9 +563,9 @@ template checkbox*(caption: string; value: var bool; widgetId: ElemId) =
       shui.elem:
         style = style(
           bg = boxBg,
-          borderColor = color(0.75, 0.75, 0.85),
-          border = 1,
-          borderRadius = 4.0
+          borderColor = ui.theme.input.border,
+          border = ui.theme.input.borderWidth,
+          borderRadius = ui.theme.input.borderRadius
         )
         size = (
           w: Sizing(kind: Fixed, min: 18, max: 18),
@@ -524,7 +574,7 @@ template checkbox*(caption: string; value: var bool; widgetId: ElemId) =
         if active:
           shui.elem:
             text = "X"
-            style = style(fg = color(0.08, 0.08, 0.14))
+            style = style(fg = ui.theme.button.fg)
             size = (w: FitSize, h: FitSize)
             align = Center
             crossAlign = Center
@@ -550,9 +600,9 @@ template slider*(
       of saVertical:
         (w: Sizing(kind: Fixed, min: 26, max: 26), h: Sizing(kind: Fixed, min: 160, max: 160))
     let fillStyle =
-      if widgetId.down(ui): color(0.98, 0.82, 0.40)
-      elif widgetId.hot(ui): color(0.96, 0.74, 0.26)
-      else: color(0.92, 0.67, 0.22)
+      if widgetId.down(ui): ui.theme.accentDown
+      elif widgetId.hot(ui): ui.theme.accentHot
+      else: ui.theme.accent
     let fillW =
       case axis
       of saHorizontal: max(12, int(220.0 * fraction))
@@ -575,9 +625,9 @@ template slider*(
       crossAlign = Center
       size = trackSize
       style = style(
-        bg = color(0.10, 0.10, 0.18),
-        borderColor = color(0.60, 0.60, 0.72),
-        border = 1,
+        bg = ui.theme.input.bg,
+        borderColor = ui.theme.input.border,
+        border = ui.theme.input.borderWidth,
         padding = 0,
         gap = 0,
         borderRadius = 6.0
@@ -598,6 +648,120 @@ template hslider*(value: var float; minValue: float; maxValue: float; widgetId: 
 template vslider*(value: var float; minValue: float; maxValue: float; widgetId: ElemId) =
   slider(value, minValue, maxValue, widgetId, saVertical)
 
+proc registerGuiImage(id: ElemId; image: GuiImage) =
+  gImages[$id] = image
+
+template imageButton*(
+  widgetId: ElemId;
+  imageTexture: SpriteTexture;
+  imageRegion: SpriteTextureRegion;
+  buttonSize: static[int];
+  selected: bool;
+  body: untyped
+) =
+  block:
+    ui.registerWidget(widgetId)
+    if widgetId.clicked(ui):
+      body
+
+    let buttonBg =
+      if widgetId.down(ui):
+        ui.theme.list.rowDownBg
+      elif selected:
+        ui.theme.list.rowSelectedBg
+      elif widgetId.hot(ui):
+        ui.theme.list.rowHotBg
+      else:
+        ui.theme.list.bg
+    let buttonBorder =
+      if selected:
+        ui.theme.button.hotBorder
+      elif widgetId.hot(ui):
+        ui.theme.button.border
+      else:
+        ui.theme.list.border
+
+    registerGuiImage(widgetId, GuiImage(
+      texture: imageTexture,
+      region: imageRegion,
+      tint: [1'f32, 1'f32, 1'f32, 1'f32]
+    ))
+    shui.elem:
+      id = widgetId
+      dir = Row
+      align = Center
+      crossAlign = Center
+      size = (
+        w: Sizing(kind: Fixed, min: buttonSize, max: buttonSize),
+        h: Sizing(kind: Fixed, min: buttonSize, max: buttonSize)
+      )
+      style = style(
+        bg = buttonBg,
+        borderColor = buttonBorder,
+        border = ui.theme.button.borderWidth,
+        padding = ui.theme.button.padding,
+        gap = 0,
+        borderRadius = 4.0
+      )
+
+template imageGridPicker*(
+  selectedIndex: var int;
+  items: untyped;
+  widgetId: ElemId;
+  columns: static[int];
+  cellSize: static[int];
+  visibleRows: static[int]
+) =
+  block:
+    const GridGap = 6
+    let rowCount =
+      if items.len <= 0:
+        0
+      else:
+        (items.len + columns - 1) div columns
+    shui.elem:
+      id = widgetId
+      dir = Col
+      size = (
+        w: Sizing(kind: Fixed, min: columns * cellSize + (columns - 1) * GridGap + 12, max: columns * cellSize + (columns - 1) * GridGap + 12),
+        h: Sizing(kind: Fixed, min: visibleRows * cellSize + max(visibleRows - 1, 0) * GridGap + 12, max: visibleRows * cellSize + max(visibleRows - 1, 0) * GridGap + 12)
+      )
+      clipOverflow = true
+      scrollable = true
+      style = style(
+        bg = ui.theme.list.bg,
+        borderColor = ui.theme.list.border,
+        border = ui.theme.list.borderWidth,
+        padding = 6,
+        gap = GridGap,
+        borderRadius = 4.0
+      )
+      for row in 0 ..< rowCount:
+        shui.elem:
+          dir = Row
+          size = (w: FitSize, h: Sizing(kind: Fixed, min: cellSize, max: cellSize))
+          style = style(bg = color(0.0, 0.0, 0.0, 0.0), gap = GridGap)
+          for column in 0 ..< columns:
+            let itemIndex = row * columns + column
+            if itemIndex < items.len:
+              let gridItem = items[itemIndex]
+              let itemId = ElemId($widgetId & ".item." & $itemIndex)
+              imageButton(
+                itemId,
+                gridItem.texture,
+                gridItem.region,
+                cellSize,
+                selectedIndex == itemIndex
+              ):
+                selectedIndex = itemIndex
+            else:
+              shui.elem:
+                size = (
+                  w: Sizing(kind: Fixed, min: cellSize, max: cellSize),
+                  h: Sizing(kind: Fixed, min: cellSize, max: cellSize)
+                )
+                style = style(bg = color(0.0, 0.0, 0.0, 0.0), gap = 0)
+
 template listBox*(
   selectedIndex: var int;
   items: untyped;
@@ -613,12 +777,12 @@ template listBox*(
       h: Sizing(kind: Fixed, min: visibleRows * 28 + 10, max: visibleRows * 28 + 10)
     )
     style = style(
-      bg = color(0.08, 0.09, 0.15),
-      borderColor = color(0.60, 0.60, 0.72),
-      border = 1,
-      padding = 4,
-      gap = 4,
-      borderRadius = 6.0
+      bg = ui.theme.list.bg,
+      borderColor = ui.theme.list.border,
+      border = ui.theme.list.borderWidth,
+      padding = ui.theme.list.padding,
+      gap = ui.theme.list.gap,
+      borderRadius = ui.theme.list.borderRadius
     )
     shui.elem:
       id = scrollId
@@ -635,29 +799,29 @@ template listBox*(
         let isSelected = selectedIndex == index
         let rowBg =
           if rowId.down(ui):
-            color(0.22, 0.26, 0.54)
+            ui.theme.list.rowDownBg
           elif isSelected:
-            color(0.20, 0.23, 0.48)
+            ui.theme.list.rowSelectedBg
           elif rowId.hot(ui):
-            color(0.12, 0.14, 0.28)
+            ui.theme.list.rowHotBg
           else:
-            color(0.0, 0.0, 0.0, 0.0)
+            ui.theme.list.rowBg
         shui.elem:
           id = rowId
           dir = Row
           size = (
             w: GrowSize,
-            h: Sizing(kind: Fixed, min: 24, max: 24)
+            h: Sizing(kind: Fixed, min: ui.theme.list.rowHeight, max: ui.theme.list.rowHeight)
           )
           align = Start
           crossAlign = Center
-          style = style(bg = rowBg, padding = 4, borderRadius = 4.0)
+          style = style(bg = rowBg, padding = ui.theme.list.padding, borderRadius = ui.theme.list.rowBorderRadius)
           shui.elem:
             text = item
             style = style(
               fg =
-                if isSelected: color(1.0, 0.92, 0.52)
-                else: color(0.94, 0.95, 0.99)
+                if isSelected: ui.theme.list.selectedFg
+                else: ui.theme.list.fg
             )
             size = (w: FitSize, h: FitSize)
 
@@ -676,12 +840,12 @@ template comboBox*(value: var string; widgetId: ElemId; body: untyped) =
 
     var bgCol =
       if widgetId.hot(ui) or focused:
-        color(0.35, 0.34, 0.7)
+        ui.theme.input.hotBg
       else:
-        color(0.1, 0.1, 0.3)
-    let fgCol = color(1.0)
+        ui.theme.input.bg
+    let fgCol = ui.theme.input.fg
     if widgetId.down(ui):
-      bgCol = color(0.6, 0.5, 0.9)
+      bgCol = ui.theme.input.downBg
 
     shui.elem:
       dir = Col
@@ -690,10 +854,10 @@ template comboBox*(value: var string; widgetId: ElemId; body: untyped) =
         style = Style(
           fg: fgCol,
           bg: bgCol,
-          borderColor: color(0.6, 0.6, 0.6),
-          border: 1,
-          padding: 4,
-          borderRadius: 0.4,
+          borderColor: ui.theme.input.border,
+          border: ui.theme.input.borderWidth,
+          padding: ui.theme.input.padding,
+          borderRadius: ui.theme.input.borderRadius,
           gap: 4
         )
         size = (w: Fit, h: Fit)
@@ -725,10 +889,10 @@ template comboBox*(value: var string; widgetId: ElemId; body: untyped) =
           style = Style(
             fg: fgCol,
             bg: bgCol,
-            borderColor: color(0.6, 0.6, 0.6),
-            border: 1,
-            padding: 4,
-            borderRadius: 0.1,
+            borderColor: ui.theme.input.border,
+            border: ui.theme.input.borderWidth,
+            padding: ui.theme.input.padding,
+            borderRadius: ui.theme.input.borderRadius,
             gap: 4
           )
           size = (w: Sizing(kind: Fit, min: 200, max: 400), h: Fit)
@@ -745,20 +909,20 @@ template comboOption*(key: string; caption: string) =
 
     var bgCol =
       if optionId.hot(ui):
-        color(0.1, 0.1, 0.3)
+        ui.theme.input.hotBg
       else:
-        color(0.35, 0.34, 0.7)
-    let fgCol = color(1.0)
+        ui.theme.input.bg
+    let fgCol = ui.theme.input.fg
     if optionId.down(ui):
-      bgCol = color(0.6, 0.5, 0.9)
+      bgCol = ui.theme.input.downBg
 
     shui.elem:
       id = optionId
       style = Style(
         fg: fgCol,
         bg: bgCol,
-        padding: 4,
-        borderRadius: 0.4,
+        padding: ui.theme.input.padding,
+        borderRadius: ui.theme.input.borderRadius,
       )
       size = (w: Grow, h: Fit)
       dir = Row

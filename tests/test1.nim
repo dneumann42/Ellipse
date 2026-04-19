@@ -140,6 +140,19 @@ suite "Canvas helpers":
   test "canvas filter defaults to linear":
     check default(RenderCanvasConfig).filterMode == tfLinear
 
+  test "canvas resize predicate detects dimension changes":
+    let config = RenderCanvasConfig(id: "hud", width: 320, height: 180)
+    check not config.canvasNeedsResize(320, 180)
+    check config.canvasNeedsResize(640, 180)
+    check config.canvasNeedsResize(320, 360)
+
+  test "canvas resize predicate rejects invalid sizes":
+    let config = RenderCanvasConfig(id: "hud", width: 320, height: 180)
+    expect CanvasError:
+      discard config.canvasNeedsResize(0, 180)
+    expect CanvasError:
+      discard config.canvasNeedsResize(320, -1)
+
   test "contain scaling centers inside full window by default":
     let rect = canvasCompositeRect(RenderCanvasConfig(
       id: "game",

@@ -482,9 +482,10 @@ proc clearGridLighting*(artist: var Artist3D) =
   artist.gridLightingInfo = default(GridLightTextureInfo)
   artist.gridLightingEnabled = false
 
-proc quad*(
+proc quadWithLightingPositions*(
   artist: var Artist3D;
   p0, p1, p2, p3: Vec3;
+  lightingPositions: array[4, Vec3];
   uvs: QuadUvs = defaultQuadUvs();
   normal: Vec3 = vec3(0'f32, 0'f32, 0'f32);
   color: Vec4 = vec4(-1'f32, -1'f32, -1'f32, -1'f32)
@@ -512,7 +513,6 @@ proc quad*(
     transformPoint(artist.model, p2),
     transformPoint(artist.model, p3)
   ]
-  let lightingPositions = [p0, p1, p2, p3]
   let quadUvs = [
     vec2(uvs.u0, uvs.v0),
     vec2(uvs.u1, uvs.v0),
@@ -538,6 +538,24 @@ proc quad*(
   artist.indices.add(base + 3)
   artist.currentBatchCount += 6
   true
+
+proc quad*(
+  artist: var Artist3D;
+  p0, p1, p2, p3: Vec3;
+  uvs: QuadUvs = defaultQuadUvs();
+  normal: Vec3 = vec3(0'f32, 0'f32, 0'f32);
+  color: Vec4 = vec4(-1'f32, -1'f32, -1'f32, -1'f32)
+): bool {.gcsafe.} =
+  artist.quadWithLightingPositions(
+    p0,
+    p1,
+    p2,
+    p3,
+    [p0, p1, p2, p3],
+    uvs,
+    normal,
+    color
+  )
 
 proc cube*(artist: var Artist3D; center, size: Vec3): bool =
   let h = size * 0.5'f32

@@ -59,11 +59,14 @@ proc initCanvasManager*(
   result.artistConfig = artistConfig
   result.activeCanvasIndex = -1
 
+proc validateCanvasDimensions(width, height: int) =
+  if width <= 0 or height <= 0:
+    raise newException(CanvasError, "Canvas dimensions must be positive")
+
 proc validateRenderCanvasConfig*(config: RenderCanvasConfig) =
   if config.id.len <= 0:
     raise newException(CanvasError, "Canvas id must not be empty")
-  if config.width <= 0 or config.height <= 0:
-    raise newException(CanvasError, "Canvas dimensions must be positive")
+  validateCanvasDimensions(config.width, config.height)
   if config.destRect.w < 0 or config.destRect.h < 0:
     raise newException(CanvasError, "Canvas destination rect must be positive")
 
@@ -80,6 +83,24 @@ proc requireCanvasIndex(manager: CanvasManager; id: string): int =
 
 proc canvasConfig*(manager: CanvasManager; id: string): RenderCanvasConfig =
   manager.canvases[manager.requireCanvasIndex(id)].config
+
+proc canvasNeedsResize*(config: RenderCanvasConfig; width, height: int): bool =
+  validateCanvasDimensions(width, height)
+  config.width != width or config.height != height
+
+proc resizeCanvas*(
+  manager: var CanvasManager;
+  id: string;
+  width, height: int
+) =
+  validateCanvasDimensions(width, height)
+  let index = manager.requireCanvasIndex(id)
+  if not manager.canvases[index].config.canvasNeedsResize(width, height):
+    return
+
+  manager.canvases[index].config.width = width
+  manager.canvases[index].config.height = height
+  manager.canvases[index].texture = createRenderTargetTexture(manager.device, width, height)
 
 proc setCanvasScaleMode*(
   manager: var CanvasManager;
