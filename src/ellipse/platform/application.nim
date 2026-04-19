@@ -18,6 +18,7 @@ const
   appOverlaySpriteBudget = 256
   defaultGuiSupersampleScale = 4
   guiCanvasId = "__ellipse.gui"
+  fpsRollingWindowSeconds = 1.0
 
 type
   NoAction* = enum
@@ -63,6 +64,8 @@ type
     fpsText: string
     fps*: cfloat
     lastCounter: uint64
+    fpsFrameSeconds: seq[float]
+    fpsFrameSecondsTotal: float
     deltaSeconds*: float
 
 template sdlError(prefix: string): string =
@@ -361,9 +364,19 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
     if app.lastCounter != 0:
       let delta = counter - app.lastCounter
       if delta > 0:
-        app.fps = getPerformanceFrequency().cfloat / delta.cfloat
-        app.fpsText = "FPS: " & formatFloat(app.fps, ffDecimal, 1)
         app.deltaSeconds = delta.float / getPerformanceFrequency().float
+        app.fpsFrameSeconds.add(app.deltaSeconds)
+        app.fpsFrameSecondsTotal += app.deltaSeconds
+        while app.fpsFrameSeconds.len > 1 and
+            app.fpsFrameSecondsTotal - app.fpsFrameSeconds[0] >= fpsRollingWindowSeconds:
+          app.fpsFrameSecondsTotal -= app.fpsFrameSeconds[0]
+          app.fpsFrameSeconds.delete(0)
+        app.fps =
+          if app.fpsFrameSecondsTotal > 0.0:
+            app.fpsFrameSeconds.len.cfloat / app.fpsFrameSecondsTotal.cfloat
+          else:
+            0'f32
+        app.fpsText = "FPS: " & formatFloat(app.fps, ffDecimal, 1)
     app.lastCounter = counter
 
     let commandBuffer =
