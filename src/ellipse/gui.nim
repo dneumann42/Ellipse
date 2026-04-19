@@ -359,6 +359,9 @@ proc setDragButton*(gui: var GuiContext; down: bool) =
     gui.ui.input.dragPressed = true
   gui.ui.input.dragDown = down
 
+proc setShiftDown*(gui: var GuiContext; down: bool) =
+  gui.ui.input.shiftDown = down
+
 proc pressBackspace*(gui: var GuiContext) =
   gui.ui.input.backspacePressed = true
 
@@ -534,6 +537,15 @@ macro button*(text: string; id: ElemId; body: untyped): untyped =
 template textInput*(value: var string; id: ElemId; body: untyped) =
   shuiInputs.lineInput(value, id):
     body
+
+template numberInput*(
+  value: var float;
+  widgetId: ElemId;
+  minValue, maxValue: float;
+  decimals: static[int] = 2;
+  step: float = 1.0
+) =
+  shuiInputs.numberInput(value, widgetId, minValue, maxValue, decimals, step)
 
 template checkbox*(caption: string; value: var bool; widgetId: ElemId) =
   block:

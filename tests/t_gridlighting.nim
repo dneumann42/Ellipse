@@ -191,3 +191,63 @@ suite "grid lighting":
 
     check field.cellSampleRgb(0, 0, 1, 1).x > 0.9'f32
     check field.cellSampleRgb(2, 0, 1, 1).x == 0'f32
+
+  test "higher sun elevation shortens directional shadows":
+    let blocker = makeBlocker(@[(x: 1, y: 0, direction: gdE)])
+    let lowSunField = buildGridLightField(
+      baseConfig(6, 1),
+      [],
+      blocker,
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellX
+        discard cellY
+        GridEnvironmentSample(
+          ambient: vec3(0'f32, 0'f32, 0'f32),
+          sunDirection: vec3(1'f32, -0.25'f32, 0'f32),
+          sunColor: vec3(1'f32, 1'f32, 1'f32),
+          sunIntensity: 1'f32,
+          sunEnabled: true
+        )
+    )
+    let highSunField = buildGridLightField(
+      baseConfig(6, 1),
+      [],
+      blocker,
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellX
+        discard cellY
+        GridEnvironmentSample(
+          ambient: vec3(0'f32, 0'f32, 0'f32),
+          sunDirection: vec3(1'f32, -2'f32, 0'f32),
+          sunColor: vec3(1'f32, 1'f32, 1'f32),
+          sunIntensity: 1'f32,
+          sunEnabled: true
+        )
+    )
+
+    check lowSunField.cellSampleRgb(4, 0, 1, 1).x == 0'f32
+    check highSunField.cellSampleRgb(4, 0, 1, 1).x > 0.9'f32
+
+  test "directional sun shadows fade near their max distance":
+    var config = baseConfig(4, 1)
+    config.sunShadowCasterHeightCells = 1'f32
+    config.sunShadowFadeCells = 2'f32
+    let field = buildGridLightField(
+      config,
+      [],
+      makeBlocker(@[(x: 1, y: 0, direction: gdE)]),
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellX
+        discard cellY
+        GridEnvironmentSample(
+          ambient: vec3(0'f32, 0'f32, 0'f32),
+          sunDirection: vec3(1'f32, -0.5'f32, 0'f32),
+          sunColor: vec3(1'f32, 1'f32, 1'f32),
+          sunIntensity: 1'f32,
+          sunEnabled: true
+        )
+    )
+    let shadowEndSample = field.cellSampleRgb(3, 0, 1, 1).x
+
+    check shadowEndSample > 0'f32
+    check shadowEndSample < 0.9'f32

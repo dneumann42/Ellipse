@@ -519,6 +519,8 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
         app.gui.pressEnter()
       of SCANCODE_TAB:
         app.gui.pressTab()
+      of SCANCODE_LSHIFT, SCANCODE_RSHIFT:
+        app.gui.setShiftDown(true)
       else:
         discard
       app.inputs.handleKeyDown(
@@ -528,6 +530,11 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
       )
       appContinue
     of EVENT_KEY_UP:
+      case event[].key.scancode
+      of SCANCODE_LSHIFT, SCANCODE_RSHIFT:
+        app.gui.setShiftDown(false)
+      else:
+        discard
       app.inputs.handleKeyUp(event[].key.key, event[].key.scancode)
       appContinue
     of EVENT_TEXT_INPUT:

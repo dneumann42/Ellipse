@@ -33,6 +33,8 @@ type
     ambient*: Vec3
     maxBrightness*: float32
     shadowBlackPoint*: float32
+    sunShadowCasterHeightCells*: float32
+    sunShadowFadeCells*: float32
 
   GridLightTextureInfo* = object
     originX*, originZ*: float32
@@ -85,6 +87,16 @@ proc applyBlackPoint(value, blackPoint: float32): float32 =
     clamp01(value)
   else:
     clamp01((value - point) / (1'f32 - point))
+
+proc sunShadowVisibility(distance, maxDistance, fadeDistance: float32): float32 =
+  if distance >= maxDistance:
+    return 1'f32
+
+  let fade = max(0'f32, min(fadeDistance, maxDistance))
+  if fade <= 0.000001'f32 or distance <= maxDistance - fade:
+    return 0'f32
+
+  clamp01((distance - (maxDistance - fade)) / fade)
 
 proc inBounds(width, height, x, y: int): bool =
   x >= 0 and x < width and y >= 0 and y < height
@@ -240,7 +252,16 @@ proc sunVisibility(
 ): float32 =
   let toSunX = -sunDirection.x
   let toSunY = -sunDirection.z
-  if abs(toSunX) <= 0.000001'f32 and abs(toSunY) <= 0.000001'f32:
+  let horizontalMagnitude = sqrt(toSunX * toSunX + toSunY * toSunY)
+  let verticalMagnitude = max(-sunDirection.y, 0'f32)
+  if horizontalMagnitude <= 0.000001'f32:
+    return 1'f32
+  if verticalMagnitude <= 0.000001'f32:
+    return 0'f32
+
+  let maxShadowDistance =
+    max(0'f32, config.sunShadowCasterHeightCells) * horizontalMagnitude / verticalMagnitude
+  if maxShadowDistance <= 0.000001'f32:
     return 1'f32
 
   var x = int(floor(sampleX))
@@ -276,7 +297,11 @@ proc sunVisibility(
         return 1'f32
       if blocked(blocker, config.width, config.height, x, y, dirX) or
           blocked(blocker, config.width, config.height, x, y, dirY):
-        return 0'f32
+        return sunShadowVisibility(
+          min(tMaxX, tMaxY) * horizontalMagnitude,
+          maxShadowDistance,
+          config.sunShadowFadeCells
+        )
       x += stepX
       y += stepY
       tMaxX += tDeltaX
@@ -286,7 +311,11 @@ proc sunVisibility(
       if not inBounds(config.width, config.height, x + stepX, y):
         return 1'f32
       if blocked(blocker, config.width, config.height, x, y, dirX):
-        return 0'f32
+        return sunShadowVisibility(
+          tMaxX * horizontalMagnitude,
+          maxShadowDistance,
+          config.sunShadowFadeCells
+        )
       x += stepX
       tMaxX += tDeltaX
     else:
@@ -294,7 +323,11 @@ proc sunVisibility(
       if not inBounds(config.width, config.height, x, y + stepY):
         return 1'f32
       if blocked(blocker, config.width, config.height, x, y, dirY):
-        return 0'f32
+        return sunShadowVisibility(
+          tMaxY * horizontalMagnitude,
+          maxShadowDistance,
+          config.sunShadowFadeCells
+        )
       y += stepY
       tMaxY += tDeltaY
 
@@ -359,7 +392,9 @@ proc buildGridLightField*(
     samplesPerCell: samples,
     ambient: config.ambient,
     maxBrightness: positive(config.maxBrightness, 1'f32),
-    shadowBlackPoint: config.shadowBlackPoint
+    shadowBlackPoint: config.shadowBlackPoint,
+    sunShadowCasterHeightCells: positive(config.sunShadowCasterHeightCells, 2'f32),
+    sunShadowFadeCells: positive(config.sunShadowFadeCells, 1.25'f32)
   )
 
   result.info = GridLightTextureInfo(
