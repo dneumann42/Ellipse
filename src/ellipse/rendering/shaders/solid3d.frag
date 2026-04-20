@@ -62,6 +62,9 @@ void main() {
   vec3 normal = normalize(fragNormal);
   vec3 gridLight = sampleGridLight(fragLightingPosition, normal);
   vec4 texel = sampleTexture(fragTextureIndex, fragUv);
+  if (texel.a <= 0.01) {
+    discard;
+  }
   vec3 color = texel.rgb * fragColor.rgb * gridLight;
   float fogDensity = max(gridLighting.fogTintDensity.w, 0.0);
   if (fogDensity > 0.0) {
