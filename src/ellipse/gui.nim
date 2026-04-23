@@ -541,11 +541,10 @@ template textInput*(value: var string; id: ElemId; body: untyped) =
 template numberInput*(
   value: var float;
   widgetId: ElemId;
-  minValue, maxValue: float;
-  decimals: static[int] = 2;
-  step: float = 1.0
+  decimals = 2;
+  step = 1.0
 ) =
-  shuiInputs.numberInput(value, widgetId, minValue, maxValue, decimals, step)
+  shuiInputs.numberInput(value, widgetId)
 
 template checkbox*(caption: string; value: var bool; widgetId: ElemId) =
   block:

@@ -28,12 +28,15 @@ type
     scancode3 = 32,
     scancode4 = 33,
     scancodeReturn = 40,
+    scancodeEscape = 41,
     scancodeBackspace = 42,
     scancodeTab = 43,
     scancodeLCtrl = 224,
     scancodeLShift = 225,
+    scancodeLAlt = 226,
     scancodeRCtrl = 228,
-    scancodeRShift = 229
+    scancodeRShift = 229,
+    scancodeRAlt = 230
 
   MouseWheelDirection* {.size: sizeof(cint), importc: "SDL_MouseWheelDirection", header: "<SDL3/SDL_mouse.h>".} = enum
     mouseWheelNormal = 0
@@ -189,12 +192,15 @@ const
   SCANCODE_3* = scancode3
   SCANCODE_4* = scancode4
   SCANCODE_RETURN* = scancodeReturn
+  SCANCODE_ESCAPE* = scancodeEscape
   SCANCODE_BACKSPACE* = scancodeBackspace
   SCANCODE_TAB* = scancodeTab
   SCANCODE_LCTRL* = scancodeLCtrl
   SCANCODE_LSHIFT* = scancodeLShift
+  SCANCODE_LALT* = scancodeLAlt
   SCANCODE_RCTRL* = scancodeRCtrl
   SCANCODE_RSHIFT* = scancodeRShift
+  SCANCODE_RALT* = scancodeRAlt
   BUTTON_LEFT* = 1'u8
   BUTTON_RIGHT* = 3'u8
 
