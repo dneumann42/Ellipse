@@ -33,6 +33,7 @@ type
   Artist3D* = object
     device*: GPUDeviceHandle
     pipeline*: GPUGraphicsPipelineHandle
+    overlayPipeline*: GPUGraphicsPipelineHandle
     vertexShader*: GPUShaderHandle
     fragmentShader*: GPUShaderHandle
     vertexBuffer*: GPUBufferHandle
@@ -69,12 +70,14 @@ type
     currentBindings: seq[TextureBinding3D]
     currentBatchStart: int
     currentBatchCount: int
+    depthTestEnabled: bool
     modelStack: seq[Mat4]
     textureFilters: Table[ptr GPUTexture, TextureFilterMode]
 
   Batch3D = object
     firstIndex: uint32
     indexCount: uint32
+    depthTestEnabled: bool
     textures: array[8, ptr GPUTexture]
     filterModes: array[8, TextureFilterMode]
 
@@ -212,7 +215,8 @@ proc finalizeBatch(artist: var Artist3D) {.gcsafe.} =
 
   var batch = Batch3D(
     firstIndex: uint32(artist.currentBatchStart),
-    indexCount: uint32(artist.currentBatchCount)
+    indexCount: uint32(artist.currentBatchCount),
+    depthTestEnabled: artist.depthTestEnabled
   )
   for i in 0 ..< artist.maxTextureSlots:
     if i < artist.currentBindings.len:
@@ -339,6 +343,17 @@ proc createPipeline(
     addr vertexAttributes[0],
     uint32(vertexAttributes.len)
   )
+  artist.overlayPipeline = createOverlayDepthTexturedPipeline(
+    artist.device,
+    swapchainFormat,
+    artist.depthFormat,
+    artist.vertexShader,
+    artist.fragmentShader,
+    addr vertexBufferDescription,
+    1,
+    addr vertexAttributes[0],
+    uint32(vertexAttributes.len)
+  )
 
 proc initArtist3D*(
   device: GPUDeviceHandle,
@@ -374,6 +389,7 @@ proc initArtist3D*(
   result.color = vec4(1'f32, 1'f32, 1'f32, 1'f32)
   result.normal = vec3(0'f32, 0'f32, 1'f32)
   result.filterMode = tfLinear
+  result.depthTestEnabled = true
   result.gridLightingTexture = nil
   result.gridLightingInfo = default(GridLightTextureInfo)
   result.gridLightingEnabled = false
@@ -440,6 +456,7 @@ proc beginFrame*(artist: var Artist3D) =
   artist.normal = vec3(0'f32, 0'f32, 1'f32)
   artist.texture = nil
   artist.filterMode = tfLinear
+  artist.depthTestEnabled = true
   artist.gridLightingTexture = nil
   artist.gridLightingInfo = default(GridLightTextureInfo)
   artist.gridLightingEnabled = false
@@ -480,6 +497,12 @@ proc setNormal*(artist: var Artist3D; normal: Vec3) =
 
 proc setFilterMode*(artist: var Artist3D; filterMode: TextureFilterMode) =
   artist.filterMode = filterMode
+
+proc setDepthTestEnabled*(artist: var Artist3D; enabled: bool) =
+  if artist.depthTestEnabled == enabled:
+    return
+  artist.finalizeBatch()
+  artist.depthTestEnabled = enabled
 
 proc setGridLighting*(
   artist: var Artist3D;
@@ -787,11 +810,14 @@ proc render*(
 
   var vertexBinding = GPUBufferBinding(buffer: raw(artist.vertexBuffer), offset: 0)
   var indexBinding = GPUBufferBinding(buffer: raw(artist.indexBuffer), offset: 0)
-  bindGPUGraphicsPipeline(renderPass, raw(artist.pipeline))
   bindGPUVertexBuffers(renderPass, 0, addr vertexBinding, 1)
   bindGPUIndexBuffer(renderPass, addr indexBinding, gpuIndexElementSize32Bit)
 
   for batch in artist.batches:
+    bindGPUGraphicsPipeline(
+      renderPass,
+      raw(if batch.depthTestEnabled: artist.pipeline else: artist.overlayPipeline)
+    )
     var samplers: array[maxShaderTextureSlots, GPUTextureSamplerBinding]
     for i in 0 ..< maxShaderTextureSlots:
       samplers[i] = GPUTextureSamplerBinding(
