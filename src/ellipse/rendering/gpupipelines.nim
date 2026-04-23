@@ -294,3 +294,69 @@ proc createOverlayDepthTexturedPipeline*(
   )
 
   createGPUGraphicsPipeline(device, pipelineInfo)
+
+proc createShadowMapPipeline*(
+  device: GPUDeviceHandle,
+  shadowFormat: GPUTextureFormat,
+  depthFormat: GPUTextureFormat,
+  vertexShader: GPUShaderHandle,
+  fragmentShader: GPUShaderHandle,
+  vertexBufferDescriptions: ptr GPUVertexBufferDescription,
+  numVertexBuffers: uint32,
+  vertexAttributes: ptr GPUVertexAttribute,
+  numVertexAttributes: uint32
+): GPUGraphicsPipelineHandle =
+  var colorTarget = GPUColorTargetDescription(
+    format: shadowFormat,
+    blend_state: GPUColorTargetBlendState(
+      src_color_blendfactor: gpuBlendFactorOne.cint,
+      dst_color_blendfactor: gpuBlendFactorZero.cint,
+      color_blend_op: gpuBlendOpAdd.cint,
+      src_alpha_blendfactor: gpuBlendFactorOne.cint,
+      dst_alpha_blendfactor: gpuBlendFactorZero.cint,
+      alpha_blend_op: gpuBlendOpAdd.cint,
+      color_write_mask: GPU_COLORCOMPONENT_R,
+      enable_blend: false,
+      enable_color_write_mask: true
+    )
+  )
+
+  let pipelineInfo = GPUGraphicsPipelineCreateInfo(
+    vertex_shader: raw(vertexShader),
+    fragment_shader: raw(fragmentShader),
+    vertex_input_state: GPUVertexInputState(
+      vertex_buffer_descriptions: vertexBufferDescriptions,
+      num_vertex_buffers: numVertexBuffers,
+      vertex_attributes: vertexAttributes,
+      num_vertex_attributes: numVertexAttributes
+    ),
+    primitive_type: gpuPrimitiveTypeTriangleList,
+    rasterizer_state: GPURasterizerState(
+      fill_mode: gpuFillModeFill,
+      cull_mode: gpuCullModeBack,
+      front_face: gpuFrontFaceCounterClockwise,
+      enable_depth_bias: false,
+      enable_depth_clip: true
+    ),
+    multisample_state: GPUMultisampleState(
+      sample_count: gpuSampleCount1,
+      sample_mask: 0,
+      enable_mask: false,
+      enable_alpha_to_coverage: false
+    ),
+    depth_stencil_state: GPUDepthStencilState(
+      compare_op: gpuCompareOpLessOrEqual,
+      enable_depth_test: true,
+      enable_depth_write: true,
+      enable_stencil_test: false
+    ),
+    target_info: GPUGraphicsPipelineTargetInfo(
+      color_target_descriptions: addr colorTarget,
+      num_color_targets: 1,
+      depth_stencil_format: depthFormat,
+      has_depth_stencil_target: true
+    ),
+    props: 0
+  )
+
+  createGPUGraphicsPipeline(device, pipelineInfo)

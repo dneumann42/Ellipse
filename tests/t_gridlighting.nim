@@ -251,3 +251,47 @@ suite "grid lighting":
 
     check shadowEndSample > 0'f32
     check shadowEndSample < 0.9'f32
+
+  test "raised terrain height blocks directional sun without wall blockers":
+    var config = baseConfig(4, 1)
+    config.sunShadowCasterHeightCells = 1'f32
+    config.sunShadowFadeCells = 0.1'f32
+    let openField = buildGridLightField(
+      config,
+      [],
+      makeBlocker(@[]),
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellX
+        discard cellY
+        GridEnvironmentSample(
+          ambient: vec3(0'f32, 0'f32, 0'f32),
+          sunDirection: vec3(1'f32, -1'f32, 0'f32),
+          sunColor: vec3(1'f32, 1'f32, 1'f32),
+          sunIntensity: 1'f32,
+          sunEnabled: true
+        )
+    )
+    let terrainField = buildGridLightField(
+      config,
+      [],
+      makeBlocker(@[]),
+      environmentSampler = proc(cellX, cellY: float32): GridEnvironmentSample {.closure, gcsafe.} =
+        discard cellX
+        discard cellY
+        GridEnvironmentSample(
+          ambient: vec3(0'f32, 0'f32, 0'f32),
+          sunDirection: vec3(1'f32, -1'f32, 0'f32),
+          sunColor: vec3(1'f32, 1'f32, 1'f32),
+          sunIntensity: 1'f32,
+          sunEnabled: true
+        ),
+      terrainHeightSampler = proc(cellX, cellY: float32): float32 {.closure, gcsafe.} =
+        discard cellY
+        if cellX >= 1'f32 and cellX < 2'f32:
+          1'f32
+        else:
+          0'f32
+    )
+
+    check openField.cellSampleRgb(2, 0, 1, 1).x > 0.9'f32
+    check terrainField.cellSampleRgb(2, 0, 1, 1).x < 0.1'f32

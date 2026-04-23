@@ -7,6 +7,7 @@ type
     gdN, gdE, gdS, gdW
 
   WallBlocker* = proc(x, y: int; direction: GridDirection): bool {.closure, gcsafe.}
+  TerrainHeightSampler* = proc(cellX, cellY: float32): float32 {.closure, gcsafe.}
 
   GridEnvironmentSample* = object
     ambient*: Vec3
@@ -89,6 +90,18 @@ proc applyBlackPoint(value, blackPoint: float32): float32 =
     clamp01((value - point) / (1'f32 - point))
 
 proc sunShadowVisibility(distance, maxDistance, fadeDistance: float32): float32 =
+  if distance >= maxDistance:
+    return 1'f32
+
+  let fade = max(0'f32, min(fadeDistance, maxDistance))
+  if fade <= 0.000001'f32 or distance <= maxDistance - fade:
+    return 0'f32
+
+  clamp01((distance - (maxDistance - fade)) / fade)
+
+proc terrainShadowVisibility(
+  distance, maxDistance, fadeDistance: float32
+): float32 =
   if distance >= maxDistance:
     return 1'f32
 
@@ -248,7 +261,8 @@ proc sunVisibility(
   config: GridLightConfig;
   blocker: WallBlocker;
   sampleX, sampleY: float32;
-  sunDirection: Vec3
+  sunDirection: Vec3;
+  terrainHeightSampler: TerrainHeightSampler = nil
 ): float32 =
   let toSunX = -sunDirection.x
   let toSunY = -sunDirection.z
@@ -263,6 +277,12 @@ proc sunVisibility(
     max(0'f32, config.sunShadowCasterHeightCells) * horizontalMagnitude / verticalMagnitude
   if maxShadowDistance <= 0.000001'f32:
     return 1'f32
+
+  let sampleHeight =
+    if terrainHeightSampler.isNil:
+      0'f32
+    else:
+      terrainHeightSampler(sampleX, sampleY)
 
   var x = int(floor(sampleX))
   var y = int(floor(sampleY))
@@ -286,6 +306,27 @@ proc sunVisibility(
   let tDeltaX = if stepX == 0: Inf.float32 else: abs(1'f32 / toSunX)
   let tDeltaY = if stepY == 0: Inf.float32 else: abs(1'f32 / toSunY)
 
+  proc terrainShadowAt(t: float32): float32 =
+    if terrainHeightSampler.isNil:
+      return 1'f32
+
+    let epsilon = 0.0005'f32
+    let queryX = sampleX + toSunX * (t + epsilon)
+    let queryY = sampleY + toSunY * (t + epsilon)
+    if not inBounds(config.width, config.height, int(floor(queryX)), int(floor(queryY))):
+      return 1'f32
+
+    let terrainHeight = terrainHeightSampler(queryX, queryY)
+    let rayHeight = sampleHeight + t * verticalMagnitude
+    if terrainHeight > rayHeight + 0.0001'f32:
+      return terrainShadowVisibility(
+        t * horizontalMagnitude,
+        maxShadowDistance,
+        config.sunShadowFadeCells
+      )
+
+    1'f32
+
   var guard = 0
   while guard < config.width * config.height * 2:
     inc guard
@@ -302,6 +343,9 @@ proc sunVisibility(
           maxShadowDistance,
           config.sunShadowFadeCells
         )
+      let terrainVisibility = terrainShadowAt(min(tMaxX, tMaxY))
+      if terrainVisibility < 1'f32:
+        return terrainVisibility
       x += stepX
       y += stepY
       tMaxX += tDeltaX
@@ -316,6 +360,9 @@ proc sunVisibility(
           maxShadowDistance,
           config.sunShadowFadeCells
         )
+      let terrainVisibility = terrainShadowAt(tMaxX)
+      if terrainVisibility < 1'f32:
+        return terrainVisibility
       x += stepX
       tMaxX += tDeltaX
     else:
@@ -328,6 +375,9 @@ proc sunVisibility(
           maxShadowDistance,
           config.sunShadowFadeCells
         )
+      let terrainVisibility = terrainShadowAt(tMaxY)
+      if terrainVisibility < 1'f32:
+        return terrainVisibility
       y += stepY
       tMaxY += tDeltaY
 
@@ -377,7 +427,8 @@ proc buildGridLightField*(
   blocker: WallBlocker;
   originX = 0'f32;
   originZ = 0'f32;
-  environmentSampler: GridEnvironmentSampler = nil
+  environmentSampler: GridEnvironmentSampler = nil;
+  terrainHeightSampler: TerrainHeightSampler = nil
 ): GridLightField =
   let width = positive(config.width, 1)
   let height = positive(config.height, 1)
@@ -419,7 +470,13 @@ proc buildGridLightField*(
           let environment = normalizedConfig.sampleEnvironment(environmentSampler, sampleX, sampleY)
           var value = environment.ambient
           if environment.sunEnabled and environment.sunIntensity > 0'f32:
-            let visibility = normalizedConfig.sunVisibility(blocker, sampleX, sampleY, environment.sunDirection)
+            let visibility = normalizedConfig.sunVisibility(
+              blocker,
+              sampleX,
+              sampleY,
+              environment.sunDirection,
+              terrainHeightSampler
+            )
             if visibility > 0'f32:
               value = value + environment.sunColor * environment.sunIntensity * visibility
           let px = cellX * blockStride + 1 + sx

@@ -5,12 +5,13 @@ import vmath
 import ../platform/SDL3
 import ../platform/SDL3gpu
 import ../platform/SDL3gpuext
-import ./[artist2D, gpupipelines, gpushaders, gpuuploads, gridlighting]
+import ./[artist2D, gpupipelines, gpushaders, gpuuploads, gridlighting, shadowmapping]
 
 type
   Artist3DError* = object of CatchableError
 
   Texture3D* = ptr GPUTexture
+  CubeTexture* = ptr GPUTexture
 
   QuadUvs* = object
     u0*, v0*, u1*, v1*: cfloat
@@ -28,6 +29,8 @@ type
     maxTextureSlots*: int
     vertexShaderPath*: string
     fragmentShaderPath*: string
+    shadowVertexShaderPath*: string
+    shadowFragmentShaderPath*: string
     samplerInfo*: GPUSamplerCreateInfo
 
   Artist3D* = object
@@ -36,21 +39,36 @@ type
     overlayPipeline*: GPUGraphicsPipelineHandle
     vertexShader*: GPUShaderHandle
     fragmentShader*: GPUShaderHandle
+    shadowVertexShader*: GPUShaderHandle
+    shadowFragmentShader*: GPUShaderHandle
     vertexBuffer*: GPUBufferHandle
     indexBuffer*: GPUBufferHandle
     vertexTransferBuffer*: GPUTransferBufferHandle
     indexTransferBuffer*: GPUTransferBufferHandle
     whiteTexture*: GPUTextureHandle
+    whiteCubeTexture*: GPUTextureHandle
     linearSampler*: GPUSamplerHandle
     nearestSampler*: GPUSamplerHandle
+    shadowSampler*: GPUSamplerHandle
+    shadowCubeSampler*: GPUSamplerHandle
     depthTexture*: GPUTextureHandle
     depthWidth*: uint32
     depthHeight*: uint32
     depthFormat*: GPUTextureFormat
+    shadowPipeline*: GPUGraphicsPipelineHandle
+    shadowFormat*: GPUTextureFormat
+    shadowCascadeTextures*: array[3, GPUTextureHandle]
+    shadowCascadeDepthTexture*: GPUTextureHandle
+    shadowCascadeResolution*: uint32
+    pointShadowTextures*: array[2, GPUTextureHandle]
+    pointShadowDepthTexture*: GPUTextureHandle
+    pointShadowResolution*: uint32
     maxQuads*: int
     maxTextureSlots*: int
     projection*: Mat4
     view*: Mat4
+    clipNear*: float32
+    clipFar*: float32
     model*: Mat4
     color*: Vec4
     normal*: Vec3
@@ -61,9 +79,19 @@ type
     gridLightingEnabled*: bool
     environmentClearEnabled*: bool
     environmentClearColor*: FColor
+    ambientColor*: Vec3
+    sunDirection*: Vec3
+    sunColor*: Vec3
+    sunIntensity*: float32
+    sunEnabled*: bool
+    shadowConfig*: ShadowRenderConfig
+    pointLights*: seq[ShadowPointLight]
     fogTint*: Vec3
     fogDensity*: float32
     cameraPosition*: Vec3
+    shadowBoundsMin*: Vec3
+    shadowBoundsMax*: Vec3
+    shadowBoundsEnabled*: bool
     vertices: seq[Vertex3D]
     indices: seq[uint32]
     batches: seq[Batch3D]
@@ -71,6 +99,8 @@ type
     currentBatchStart: int
     currentBatchCount: int
     depthTestEnabled: bool
+    sceneLightingEnabled: bool
+    shadowCastingEnabled: bool
     modelStack: seq[Mat4]
     textureFilters: Table[ptr GPUTexture, TextureFilterMode]
 
@@ -78,6 +108,8 @@ type
     firstIndex: uint32
     indexCount: uint32
     depthTestEnabled: bool
+    sceneLightingEnabled: bool
+    shadowCastingEnabled: bool
     textures: array[8, ptr GPUTexture]
     filterModes: array[8, TextureFilterMode]
 
@@ -90,15 +122,38 @@ type
     view: Mat4
 
   GridLightingUniforms = object
-    originCellSize: Vec4
-    gridSamples: Vec4
+    sunShadowMatrices: array[3, Mat4]
+    cascadeSplits: Vec4
+    sunShadowTexelSize: array[3, Vec4]
+    ambientColor: Vec4
     textureSize: Vec4
+    sunDirectionIntensity: Vec4
+    sunColorEnabled: Vec4
+    sunShadowParams: Vec4
+    pointShadowParams: Vec4
+    pointLightPositionRadius: array[8, Vec4]
+    pointLightColorIntensity: array[8, Vec4]
+    pointLightFalloffShadow: array[8, Vec4]
     fogTintDensity: Vec4
     cameraPosition: Vec4
+
+  BatchLightingUniforms = object
+    flags: Vec4
+
+  ShadowPassVertexUniforms = object
+    viewProjection: Mat4
+
+  ShadowPassFragmentUniforms = object
+    lightPositionFarMode: Vec4
 
 const
   maxShaderTextureSlots = 8
   gridLightSamplerSlot = maxShaderTextureSlots
+  sunShadowSamplerSlot = gridLightSamplerSlot
+  pointShadowSamplerSlot = sunShadowSamplerSlot + 3
+  maxSunShadowCascades = 3
+  maxShadowedPointLights = 2
+  maxForwardPointLights = 8
   shaderDir = currentSourcePath.parentDir / "shaders"
 
 proc default3DVertexShaderPath*(): string =
@@ -106,6 +161,12 @@ proc default3DVertexShaderPath*(): string =
 
 proc default3DFragmentShaderPath*(): string =
   shaderDir / "solid3d.frag.spv"
+
+proc default3DShadowVertexShaderPath*(): string =
+  shaderDir / "shadow3d.vert.spv"
+
+proc default3DShadowFragmentShaderPath*(): string =
+  shaderDir / "shadow3d.frag.spv"
 
 proc defaultQuadUvs*(): QuadUvs =
   QuadUvs(u0: 0, v0: 0, u1: 1, v1: 1)
@@ -117,6 +178,15 @@ proc uniformsPointer(value: var FrameUniforms): pointer =
   cast[pointer](addr value)
 
 proc lightingUniformsPointer(value: var GridLightingUniforms): pointer =
+  cast[pointer](addr value)
+
+proc batchLightingUniformsPointer(value: var BatchLightingUniforms): pointer =
+  cast[pointer](addr value)
+
+proc shadowPassVertexUniformsPointer(value: var ShadowPassVertexUniforms): pointer =
+  cast[pointer](addr value)
+
+proc shadowPassFragmentUniformsPointer(value: var ShadowPassFragmentUniforms): pointer =
   cast[pointer](addr value)
 
 proc samplerInfoForFilter(
@@ -182,6 +252,56 @@ proc createWhiteTexture(device: GPUDeviceHandle): GPUTextureHandle =
   let pixels = [255'u8, 255'u8, 255'u8, 255'u8]
   uploadTexture2DData(device, result, 1, 1, pixels, "artist3d white texture")
 
+proc createWhiteCubeTexture(device: GPUDeviceHandle): GPUTextureHandle =
+  let textureInfo = GPUTextureCreateInfo(
+    `type`: gpuTextureTypeCube,
+    format: GPU_TEXTUREFORMAT_R16_UNORM,
+    usage: GPU_TEXTUREUSAGE_SAMPLER or GPU_TEXTUREUSAGE_COLOR_TARGET,
+    width: 1,
+    height: 1,
+    layer_count_or_depth: 6,
+    num_levels: 1,
+    sample_count: gpuSampleCount1,
+    props: 0
+  )
+  result = createGPUTexture(device, textureInfo)
+
+proc createShadowMapTexture(
+  device: GPUDeviceHandle;
+  width, height: uint32;
+  format: GPUTextureFormat
+): GPUTextureHandle =
+  let textureInfo = GPUTextureCreateInfo(
+    `type`: gpuTextureType2D,
+    format: format,
+    usage: GPU_TEXTUREUSAGE_SAMPLER or GPU_TEXTUREUSAGE_COLOR_TARGET,
+    width: width,
+    height: height,
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: gpuSampleCount1,
+    props: 0
+  )
+  createGPUTexture(device, textureInfo)
+
+proc createShadowCubeTexture(
+  device: GPUDeviceHandle;
+  size: uint32;
+  format: GPUTextureFormat
+): GPUTextureHandle =
+  let textureInfo = GPUTextureCreateInfo(
+    `type`: gpuTextureTypeCube,
+    format: format,
+    usage: GPU_TEXTUREUSAGE_SAMPLER or GPU_TEXTUREUSAGE_COLOR_TARGET,
+    width: size,
+    height: size,
+    layer_count_or_depth: 6,
+    num_levels: 1,
+    sample_count: gpuSampleCount1,
+    props: 0
+  )
+  createGPUTexture(device, textureInfo)
+
 proc finalizeBatch(artist: var Artist3D) {.gcsafe.}
 
 proc textureSlot(
@@ -216,7 +336,9 @@ proc finalizeBatch(artist: var Artist3D) {.gcsafe.} =
   var batch = Batch3D(
     firstIndex: uint32(artist.currentBatchStart),
     indexCount: uint32(artist.currentBatchCount),
-    depthTestEnabled: artist.depthTestEnabled
+    depthTestEnabled: artist.depthTestEnabled,
+    sceneLightingEnabled: artist.sceneLightingEnabled,
+    shadowCastingEnabled: artist.shadowCastingEnabled
   )
   for i in 0 ..< artist.maxTextureSlots:
     if i < artist.currentBindings.len:
@@ -273,6 +395,28 @@ proc createDepthTexture(
     props: 0
   )
   createGPUTexture(device, textureInfo)
+
+proc ensureShadowCascadeResources(artist: var Artist3D; resolution: uint32) =
+  let size = max(resolution, 1'u32)
+  if raw(artist.shadowCascadeDepthTexture).isNil or artist.shadowCascadeResolution != size:
+    reset(artist.shadowCascadeDepthTexture)
+    for texture in artist.shadowCascadeTextures.mitems:
+      reset(texture)
+    artist.shadowCascadeDepthTexture = createDepthTexture(artist.device, size, size, artist.depthFormat)
+    for texture in artist.shadowCascadeTextures.mitems:
+      texture = createShadowMapTexture(artist.device, size, size, artist.shadowFormat)
+    artist.shadowCascadeResolution = size
+
+proc ensurePointShadowResources(artist: var Artist3D; resolution: uint32) =
+  let size = max(resolution, 1'u32)
+  if raw(artist.pointShadowDepthTexture).isNil or artist.pointShadowResolution != size:
+    reset(artist.pointShadowDepthTexture)
+    for texture in artist.pointShadowTextures.mitems:
+      reset(texture)
+    artist.pointShadowDepthTexture = createDepthTexture(artist.device, size, size, artist.depthFormat)
+    for texture in artist.pointShadowTextures.mitems:
+      texture = createShadowCubeTexture(artist.device, size, artist.shadowFormat)
+    artist.pointShadowResolution = size
 
 proc ensureDepthTexture(artist: var Artist3D; width, height: uint32) =
   let w = max(width, 1'u32)
@@ -355,6 +499,30 @@ proc createPipeline(
     uint32(vertexAttributes.len)
   )
 
+  var shadowVertexBufferDescription = GPUVertexBufferDescription(
+    slot: 0,
+    pitch: uint32(sizeof(Vertex3D)),
+    input_rate: gpuVertexInputRateVertex,
+    instance_step_rate: 0
+  )
+  var shadowVertexAttribute = GPUVertexAttribute(
+    location: 0,
+    buffer_slot: 0,
+    format: gpuVertexElementFormatFloat3,
+    offset: uint32(offsetof(Vertex3D, position))
+  )
+  artist.shadowPipeline = createShadowMapPipeline(
+    artist.device,
+    artist.shadowFormat,
+    artist.depthFormat,
+    artist.shadowVertexShader,
+    artist.shadowFragmentShader,
+    addr shadowVertexBufferDescription,
+    1,
+    addr shadowVertexAttribute,
+    1
+  )
+
 proc initArtist3D*(
   device: GPUDeviceHandle,
   swapchainFormat: GPUTextureFormat,
@@ -376,6 +544,19 @@ proc initArtist3D*(
   result.depthFormat = GPU_TEXTUREFORMAT_D16_UNORM
   if not gpuTextureSupportsFormat(device, result.depthFormat, gpuTextureType2D, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET):
     raise newException(Artist3DError, "D16_UNORM depth textures are not supported by this SDL GPU device")
+  result.shadowFormat = GPU_TEXTUREFORMAT_R16_UNORM
+  if not gpuTextureSupportsFormat(
+      device,
+      result.shadowFormat,
+      gpuTextureType2D,
+      GPU_TEXTUREUSAGE_SAMPLER or GPU_TEXTUREUSAGE_COLOR_TARGET):
+    raise newException(Artist3DError, "R16_UNORM shadow map textures are not supported by this SDL GPU device")
+  if not gpuTextureSupportsFormat(
+      device,
+      result.shadowFormat,
+      gpuTextureTypeCube,
+      GPU_TEXTUREUSAGE_SAMPLER or GPU_TEXTUREUSAGE_COLOR_TARGET):
+    raise newException(Artist3DError, "Cubemap R16_UNORM shadow textures are not supported by this SDL GPU device")
 
   result.vertices = newSeqOfCap[Vertex3D](result.maxQuads * 4)
   result.indices = newSeqOfCap[uint32](result.maxQuads * 6)
@@ -386,18 +567,32 @@ proc initArtist3D*(
   result.projection = identityMat4()
   result.view = identityMat4()
   result.model = identityMat4()
+  result.clipNear = 0.03'f32
+  result.clipFar = 100'f32
   result.color = vec4(1'f32, 1'f32, 1'f32, 1'f32)
   result.normal = vec3(0'f32, 0'f32, 1'f32)
   result.filterMode = tfLinear
   result.depthTestEnabled = true
+  result.sceneLightingEnabled = true
+  result.shadowCastingEnabled = true
   result.gridLightingTexture = nil
   result.gridLightingInfo = default(GridLightTextureInfo)
   result.gridLightingEnabled = false
   result.environmentClearEnabled = false
   result.environmentClearColor = default(FColor)
+  result.ambientColor = vec3(1'f32, 1'f32, 1'f32)
+  result.sunDirection = vec3(0.4'f32, -1'f32, 0.2'f32)
+  result.sunColor = vec3(1'f32, 1'f32, 1'f32)
+  result.sunIntensity = 0'f32
+  result.sunEnabled = false
+  result.shadowConfig = defaultShadowRenderConfig()
+  result.pointLights = @[]
   result.fogTint = vec3(0'f32, 0'f32, 0'f32)
   result.fogDensity = 0'f32
   result.cameraPosition = vec3(0'f32, 0'f32, 0'f32)
+  result.shadowBoundsMin = vec3(0'f32, 0'f32, 0'f32)
+  result.shadowBoundsMax = vec3(0'f32, 0'f32, 0'f32)
+  result.shadowBoundsEnabled = false
 
   result.vertexShader = createShaderFromFile(
     device,
@@ -410,7 +605,21 @@ proc initArtist3D*(
     device,
     if config.fragmentShaderPath.len > 0: config.fragmentShaderPath else: default3DFragmentShaderPath(),
     gpuShaderStageFragment,
-    uint32(maxShaderTextureSlots + 1),
+    uint32(maxShaderTextureSlots + maxSunShadowCascades + maxShadowedPointLights),
+    2
+  )
+  result.shadowVertexShader = createShaderFromFile(
+    device,
+    if config.shadowVertexShaderPath.len > 0: config.shadowVertexShaderPath else: default3DShadowVertexShaderPath(),
+    gpuShaderStageVertex,
+    0,
+    1
+  )
+  result.shadowFragmentShader = createShaderFromFile(
+    device,
+    if config.shadowFragmentShaderPath.len > 0: config.shadowFragmentShaderPath else: default3DShadowFragmentShaderPath(),
+    gpuShaderStageFragment,
+    0,
     1
   )
 
@@ -436,11 +645,18 @@ proc initArtist3D*(
   ))
 
   result.whiteTexture = createWhiteTexture(device)
+  result.whiteCubeTexture = createWhiteCubeTexture(device)
   result.registerTextureFilter(raw(result.whiteTexture), tfLinear)
   let samplerInfo =
     if config.samplerInfo == default(GPUSamplerCreateInfo): defaultSamplerInfo() else: config.samplerInfo
   result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfLinear))
   result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfNearest))
+  var shadowSamplerInfo = samplerInfo
+  shadowSamplerInfo.address_mode_u = gpuSamplerAddressModeClampToEdge
+  shadowSamplerInfo.address_mode_v = gpuSamplerAddressModeClampToEdge
+  shadowSamplerInfo.address_mode_w = gpuSamplerAddressModeClampToEdge
+  result.shadowSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfLinear))
+  result.shadowCubeSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfLinear))
   result.createPipeline(swapchainFormat)
 
 proc beginFrame*(artist: var Artist3D) =
@@ -452,22 +668,39 @@ proc beginFrame*(artist: var Artist3D) =
   artist.currentBatchCount = 0
   artist.modelStack.setLen(0)
   artist.model = identityMat4()
+  artist.clipNear = 0.03'f32
+  artist.clipFar = 100'f32
   artist.color = vec4(1'f32, 1'f32, 1'f32, 1'f32)
   artist.normal = vec3(0'f32, 0'f32, 1'f32)
   artist.texture = nil
   artist.filterMode = tfLinear
   artist.depthTestEnabled = true
+  artist.sceneLightingEnabled = true
+  artist.shadowCastingEnabled = true
   artist.gridLightingTexture = nil
   artist.gridLightingInfo = default(GridLightTextureInfo)
   artist.gridLightingEnabled = false
   artist.environmentClearEnabled = false
   artist.environmentClearColor = default(FColor)
+  artist.ambientColor = vec3(1'f32, 1'f32, 1'f32)
+  artist.sunDirection = vec3(0.4'f32, -1'f32, 0.2'f32)
+  artist.sunColor = vec3(1'f32, 1'f32, 1'f32)
+  artist.sunIntensity = 0'f32
+  artist.sunEnabled = false
+  artist.pointLights.setLen(0)
   artist.fogTint = vec3(0'f32, 0'f32, 0'f32)
   artist.fogDensity = 0'f32
   artist.cameraPosition = vec3(0'f32, 0'f32, 0'f32)
+  artist.shadowBoundsMin = vec3(0'f32, 0'f32, 0'f32)
+  artist.shadowBoundsMax = vec3(0'f32, 0'f32, 0'f32)
+  artist.shadowBoundsEnabled = false
 
 proc setProjection*(artist: var Artist3D; projection: Mat4) =
   artist.projection = projection
+
+proc setClipPlanes*(artist: var Artist3D; nearPlane, farPlane: float32) =
+  artist.clipNear = max(0.0001'f32, nearPlane)
+  artist.clipFar = max(artist.clipNear + 0.001'f32, farPlane)
 
 proc setView*(artist: var Artist3D; view: Mat4) =
   artist.view = view
@@ -503,6 +736,53 @@ proc setDepthTestEnabled*(artist: var Artist3D; enabled: bool) =
     return
   artist.finalizeBatch()
   artist.depthTestEnabled = enabled
+
+proc setSceneLightingEnabled*(artist: var Artist3D; enabled: bool) =
+  if artist.sceneLightingEnabled == enabled:
+    return
+  artist.finalizeBatch()
+  artist.sceneLightingEnabled = enabled
+
+proc setShadowCastingEnabled*(artist: var Artist3D; enabled: bool) =
+  if artist.shadowCastingEnabled == enabled:
+    return
+  artist.finalizeBatch()
+  artist.shadowCastingEnabled = enabled
+
+proc setAmbientLight*(artist: var Artist3D; ambient: Vec3) =
+  artist.ambientColor = ambient
+
+proc setSunLight*(
+  artist: var Artist3D;
+  direction: Vec3;
+  color: Vec3;
+  intensity: float32;
+  enabled = true
+) =
+  artist.sunDirection =
+    if lengthSq(direction) <= 0.000001'f32:
+      vec3(0.4'f32, -1'f32, 0.2'f32)
+    else:
+      normalize(direction)
+  artist.sunColor = color
+  artist.sunIntensity = max(0'f32, intensity)
+  artist.sunEnabled = enabled and artist.sunIntensity > 0'f32
+
+proc setPointLights*(artist: var Artist3D; lights: openArray[ShadowPointLight]) =
+  artist.pointLights.setLen(0)
+  for light in lights:
+    artist.pointLights.add(light)
+
+proc setShadowConfig*(artist: var Artist3D; config: ShadowRenderConfig) =
+  artist.shadowConfig = config
+
+proc setShadowBounds*(artist: var Artist3D; boundsMin, boundsMax: Vec3) =
+  artist.shadowBoundsMin = boundsMin
+  artist.shadowBoundsMax = boundsMax
+  artist.shadowBoundsEnabled =
+    boundsMax.x > boundsMin.x and
+    boundsMax.y > boundsMin.y and
+    boundsMax.z > boundsMin.z
 
 proc setGridLighting*(
   artist: var Artist3D;
@@ -707,6 +987,88 @@ proc uploadGeometry(artist: var Artist3D; commandBuffer: ptr GPUCommandBuffer) =
   uploadToGPUBuffer(copyPass, addr indexSource, addr indexDestination, true)
   endGPUCopyPass(copyPass)
 
+proc renderShadowPass(
+  artist: var Artist3D;
+  commandBuffer: ptr GPUCommandBuffer;
+  shadowTexture: ptr GPUTexture;
+  depthTexture: ptr GPUTexture;
+  width, height: uint32;
+  layer: uint32;
+  viewProjection: Mat4;
+  lightPosition: Vec3;
+  lightFarOrZero: float32
+) =
+  var shadowVertexUniforms = ShadowPassVertexUniforms(viewProjection: viewProjection)
+  pushGPUVertexUniformData(
+    commandBuffer,
+    0,
+    shadowPassVertexUniformsPointer(shadowVertexUniforms),
+    uint32(sizeof(shadowVertexUniforms))
+  )
+
+  var shadowFragmentUniforms = ShadowPassFragmentUniforms(
+    lightPositionFarMode: vec4(lightPosition.x, lightPosition.y, lightPosition.z, lightFarOrZero)
+  )
+  pushGPUFragmentUniformData(
+    commandBuffer,
+    0,
+    shadowPassFragmentUniformsPointer(shadowFragmentUniforms),
+    uint32(sizeof(shadowFragmentUniforms))
+  )
+
+  var colorTarget = GPUColorTargetInfo(
+    texture: shadowTexture,
+    mip_level: 0,
+    layer_or_depth_plane: layer,
+    clear_color: FColor(r: 1'f32, g: 1'f32, b: 1'f32, a: 1'f32),
+    load_op: gpuLoadOpClear,
+    store_op: gpuStoreOpStore,
+    resolve_texture: nil,
+    resolve_mip_level: 0,
+    resolve_layer: 0,
+    cycle: false,
+    cycle_resolve_texture: false
+  )
+  var depthTarget = GPUDepthStencilTargetInfo(
+    texture: depthTexture,
+    clear_depth: 1'f32,
+    load_op: gpuLoadOpClear,
+    store_op: gpuStoreOpDontCare,
+    stencil_load_op: gpuLoadOpDontCare,
+    stencil_store_op: gpuStoreOpDontCare,
+    cycle: false,
+    clear_stencil: 0,
+    mip_level: 0,
+    layer: 0
+  )
+  let renderPass = beginGPURenderPass(commandBuffer, addr colorTarget, 1, addr depthTarget)
+  if renderPass.isNil:
+    discard cancelGPUCommandBuffer(commandBuffer)
+    raise newException(Artist3DError, "beginGPURenderPass failed for shadow pass: " & $getError())
+
+  var fullScissor = Rect(x: 0, y: 0, w: cint(width), h: cint(height))
+  setGPUScissor(renderPass, addr fullScissor)
+  bindGPUGraphicsPipeline(renderPass, raw(artist.shadowPipeline))
+
+  var vertexBinding = GPUBufferBinding(buffer: raw(artist.vertexBuffer), offset: 0)
+  var indexBinding = GPUBufferBinding(buffer: raw(artist.indexBuffer), offset: 0)
+  bindGPUVertexBuffers(renderPass, 0, addr vertexBinding, 1)
+  bindGPUIndexBuffer(renderPass, addr indexBinding, gpuIndexElementSize32Bit)
+
+  for batch in artist.batches:
+    if not batch.depthTestEnabled or not batch.shadowCastingEnabled:
+      continue
+    drawGPUIndexedPrimitives(
+      renderPass,
+      batch.indexCount,
+      1,
+      batch.firstIndex,
+      0,
+      0
+    )
+
+  endGPURenderPass(renderPass)
+
 proc render*(
   artist: var Artist3D,
   commandBuffer: ptr GPUCommandBuffer,
@@ -719,6 +1081,87 @@ proc render*(
   artist.uploadGeometry(commandBuffer)
   artist.ensureDepthTexture(targetWidth, targetHeight)
 
+  let shadowConfig = artist.shadowConfig
+  let maxVisiblePointLights = clamp(shadowConfig.maxVisiblePointLights, 0, maxForwardPointLights)
+  let maxShadowedLights = clamp(shadowConfig.maxShadowedPointLights, 0, maxShadowedPointLights)
+  let activePointLights = selectActivePointLights(
+    artist.pointLights,
+    artist.cameraPosition,
+    maxVisiblePointLights,
+    maxShadowedLights
+  )
+  let shadowCamera = ShadowCamera(
+    position: artist.cameraPosition,
+    view: artist.view,
+    projection: artist.projection,
+    nearPlane: artist.clipNear,
+    farPlane: artist.clipFar
+  )
+  let sunCascades =
+    if artist.sunEnabled:
+      if artist.shadowBoundsEnabled:
+        buildDirectionalShadowCascades(
+          shadowCamera,
+          artist.sunDirection,
+          artist.shadowBoundsMin,
+          artist.shadowBoundsMax,
+          clamp(shadowConfig.cascadeCount, 0, maxSunShadowCascades),
+          shadowConfig.maxSunDistance,
+          shadowConfig.splitLambda,
+          shadowConfig.cascadeResolution
+        )
+      else:
+        buildDirectionalShadowCascades(
+          shadowCamera,
+          artist.sunDirection,
+          clamp(shadowConfig.cascadeCount, 0, maxSunShadowCascades),
+          shadowConfig.maxSunDistance,
+          shadowConfig.splitLambda,
+          shadowConfig.cascadeResolution
+        )
+    else:
+      @[]
+  var shadowedPointLightCount = 0
+  for light in activePointLights:
+    if light.castsShadow:
+      inc shadowedPointLightCount
+
+  if sunCascades.len > 0:
+    artist.ensureShadowCascadeResources(uint32(max(1, shadowConfig.cascadeResolution)))
+    for cascadeIndex, cascade in sunCascades:
+      artist.renderShadowPass(
+        commandBuffer,
+        raw(artist.shadowCascadeTextures[cascadeIndex]),
+        raw(artist.shadowCascadeDepthTexture),
+        artist.shadowCascadeResolution,
+        artist.shadowCascadeResolution,
+        0,
+        cascade.viewProjection,
+        vec3(0'f32, 0'f32, 0'f32),
+        0'f32
+      )
+
+  if shadowedPointLightCount > 0:
+    artist.ensurePointShadowResources(uint32(max(1, shadowConfig.pointShadowResolution)))
+    var shadowTextureIndex = 0
+    for light in activePointLights:
+      if not light.castsShadow:
+        continue
+      let faceMatrices = buildPointLightFaceViewProjections(light.light.position, light.light.radius)
+      for faceIndex, faceMatrix in faceMatrices:
+        artist.renderShadowPass(
+          commandBuffer,
+          raw(artist.pointShadowTextures[shadowTextureIndex]),
+          raw(artist.pointShadowDepthTexture),
+          artist.pointShadowResolution,
+          artist.pointShadowResolution,
+          uint32(faceIndex),
+          faceMatrix,
+          light.light.position,
+          light.light.radius
+        )
+      inc shadowTextureIndex
+
   var uniforms = FrameUniforms(
     projection: artist.projection,
     view: artist.view
@@ -729,35 +1172,100 @@ proc render*(
     uniformsPointer(uniforms),
     uint32(sizeof(uniforms))
   )
-  let lightingInfo = artist.gridLightingInfo
-  let lightingEnabled =
-    if artist.gridLightingEnabled and not artist.gridLightingTexture.isNil: 1'f32 else: 0'f32
-  var lightingUniforms = GridLightingUniforms(
-    originCellSize: vec4(
-      lightingInfo.originX,
-      lightingInfo.originZ,
-      lightingInfo.cellSize,
-      lightingEnabled
-    ),
-    gridSamples: vec4(
-      lightingInfo.gridWidth.float32,
-      lightingInfo.gridHeight.float32,
-      lightingInfo.samplesPerCell.float32,
-      lightingInfo.blockStride.float32
-    ),
-    textureSize: vec4(
-      lightingInfo.textureWidth.float32,
-      lightingInfo.textureHeight.float32,
-      if lightingInfo.textureWidth > 0: 1'f32 / lightingInfo.textureWidth.float32 else: 1'f32,
-      if lightingInfo.textureHeight > 0: 1'f32 / lightingInfo.textureHeight.float32 else: 1'f32
-    ),
-    fogTintDensity: vec4(
-      artist.fogTint.x,
-      artist.fogTint.y,
-      artist.fogTint.z,
-      artist.fogDensity
-    ),
-    cameraPosition: vec4(artist.cameraPosition.x, artist.cameraPosition.y, artist.cameraPosition.z, 1'f32)
+
+  var lightingUniforms = GridLightingUniforms()
+  for cascadeIndex in 0 ..< maxSunShadowCascades:
+    if cascadeIndex < sunCascades.len:
+      lightingUniforms.sunShadowMatrices[cascadeIndex] = sunCascades[cascadeIndex].viewProjection
+      lightingUniforms.sunShadowTexelSize[cascadeIndex] = vec4(
+        1'f32 / max(1'u32, artist.shadowCascadeResolution).float32,
+        1'f32 / max(1'u32, artist.shadowCascadeResolution).float32,
+        0'f32,
+        0'f32
+      )
+    else:
+      lightingUniforms.sunShadowMatrices[cascadeIndex] = mat4()
+      lightingUniforms.sunShadowTexelSize[cascadeIndex] = vec4(0'f32, 0'f32, 0'f32, 0'f32)
+  lightingUniforms.cascadeSplits = vec4(
+    if sunCascades.len > 0: sunCascades[0].splitFar else: 0'f32,
+    if sunCascades.len > 1: sunCascades[1].splitFar else: 0'f32,
+    if sunCascades.len > 2: sunCascades[2].splitFar else: 0'f32,
+    sunCascades.len.float32
+  )
+  lightingUniforms.ambientColor = vec4(
+    artist.ambientColor.x,
+    artist.ambientColor.y,
+    artist.ambientColor.z,
+    1'f32
+  )
+  lightingUniforms.textureSize = vec4(0'f32, 0'f32, 0'f32, 0'f32)
+  lightingUniforms.sunDirectionIntensity = vec4(
+    artist.sunDirection.x,
+    artist.sunDirection.y,
+    artist.sunDirection.z,
+    artist.sunIntensity
+  )
+  lightingUniforms.sunColorEnabled = vec4(
+    artist.sunColor.x,
+    artist.sunColor.y,
+    artist.sunColor.z,
+    if artist.sunEnabled: 1'f32 else: 0'f32
+  )
+  lightingUniforms.sunShadowParams = vec4(
+    shadowConfig.sunDepthBias,
+    shadowConfig.sunNormalBias,
+    shadowConfig.sunFilterRadiusTexels,
+    sunCascades.len.float32
+  )
+  lightingUniforms.pointShadowParams = vec4(
+    activePointLights.len.float32,
+    shadowedPointLightCount.float32,
+    shadowConfig.pointDepthBias,
+    shadowConfig.pointSoftness
+  )
+  for lightIndex in 0 ..< maxForwardPointLights:
+    if lightIndex < activePointLights.len:
+      let light = activePointLights[lightIndex]
+      lightingUniforms.pointLightPositionRadius[lightIndex] = vec4(
+        light.light.position.x,
+        light.light.position.y,
+        light.light.position.z,
+        light.light.radius
+      )
+      lightingUniforms.pointLightColorIntensity[lightIndex] = vec4(
+        light.light.color.x,
+        light.light.color.y,
+        light.light.color.z,
+        light.light.intensity
+      )
+      var shadowIndex = -1'f32
+      if light.castsShadow:
+        var assignedIndex = 0
+        for previousIndex in 0 .. lightIndex:
+          if activePointLights[previousIndex].castsShadow:
+            shadowIndex = assignedIndex.float32
+            inc assignedIndex
+      lightingUniforms.pointLightFalloffShadow[lightIndex] = vec4(
+        light.light.falloff,
+        shadowIndex,
+        shadowConfig.pointNormalBias,
+        0'f32
+      )
+    else:
+      lightingUniforms.pointLightPositionRadius[lightIndex] = vec4(0'f32, 0'f32, 0'f32, 0'f32)
+      lightingUniforms.pointLightColorIntensity[lightIndex] = vec4(0'f32, 0'f32, 0'f32, 0'f32)
+      lightingUniforms.pointLightFalloffShadow[lightIndex] = vec4(0'f32, -1'f32, 0'f32, 0'f32)
+  lightingUniforms.fogTintDensity = vec4(
+    artist.fogTint.x,
+    artist.fogTint.y,
+    artist.fogTint.z,
+    artist.fogDensity
+  )
+  lightingUniforms.cameraPosition = vec4(
+    artist.cameraPosition.x,
+    artist.cameraPosition.y,
+    artist.cameraPosition.z,
+    1'f32
   )
   pushGPUFragmentUniformData(
     commandBuffer,
@@ -829,15 +1337,37 @@ proc render*(
             raw(artist.linearSampler)
       )
     bindGPUFragmentSamplers(renderPass, 0, addr samplers[0], uint32(samplers.len))
-    var gridLightSampler = GPUTextureSamplerBinding(
-      texture:
-        if lightingEnabled > 0'f32:
-          artist.gridLightingTexture
-        else:
-          raw(artist.whiteTexture),
-      sampler: raw(artist.linearSampler)
+    var sunShadowSamplers: array[maxSunShadowCascades, GPUTextureSamplerBinding]
+    for shadowIndex in 0 ..< maxSunShadowCascades:
+      sunShadowSamplers[shadowIndex] = GPUTextureSamplerBinding(
+        texture:
+          if shadowIndex < sunCascades.len:
+            raw(artist.shadowCascadeTextures[shadowIndex])
+          else:
+            raw(artist.whiteTexture),
+        sampler: raw(artist.shadowSampler)
+      )
+    bindGPUFragmentSamplers(renderPass, sunShadowSamplerSlot, addr sunShadowSamplers[0], uint32(sunShadowSamplers.len))
+    var pointShadowSamplers: array[maxShadowedPointLights, GPUTextureSamplerBinding]
+    for shadowIndex in 0 ..< maxShadowedPointLights:
+      pointShadowSamplers[shadowIndex] = GPUTextureSamplerBinding(
+        texture:
+          if shadowIndex < shadowedPointLightCount:
+            raw(artist.pointShadowTextures[shadowIndex])
+          else:
+            raw(artist.whiteCubeTexture),
+        sampler: raw(artist.shadowCubeSampler)
+      )
+    bindGPUFragmentSamplers(renderPass, pointShadowSamplerSlot, addr pointShadowSamplers[0], uint32(pointShadowSamplers.len))
+    var batchUniforms = BatchLightingUniforms(
+      flags: vec4(if batch.sceneLightingEnabled: 1'f32 else: 0'f32, 0'f32, 0'f32, 0'f32)
     )
-    bindGPUFragmentSamplers(renderPass, gridLightSamplerSlot, addr gridLightSampler, 1)
+    pushGPUFragmentUniformData(
+      commandBuffer,
+      1,
+      batchLightingUniformsPointer(batchUniforms),
+      uint32(sizeof(batchUniforms))
+    )
     drawGPUIndexedPrimitives(
       renderPass,
       batch.indexCount,
@@ -851,3 +1381,6 @@ proc render*(
 
 proc whiteTexture3D*(artist: Artist3D): Texture3D =
   raw(artist.whiteTexture)
+
+proc whiteCubeTexture3D*(artist: Artist3D): CubeTexture =
+  raw(artist.whiteCubeTexture)
