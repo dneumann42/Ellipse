@@ -99,8 +99,11 @@ type
     currentBatchStart: int
     currentBatchCount: int
     depthTestEnabled: bool
+    mainPassEnabled: bool
     sceneLightingEnabled: bool
     shadowCastingEnabled: bool
+    currentBatchBoundsMin: Vec3
+    currentBatchBoundsMax: Vec3
     modelStack: seq[Mat4]
     textureFilters: Table[ptr GPUTexture, TextureFilterMode]
 
@@ -108,8 +111,11 @@ type
     firstIndex: uint32
     indexCount: uint32
     depthTestEnabled: bool
+    mainPassEnabled: bool
     sceneLightingEnabled: bool
     shadowCastingEnabled: bool
+    boundsMin: Vec3
+    boundsMax: Vec3
     textures: array[8, ptr GPUTexture]
     filterModes: array[8, TextureFilterMode]
 
@@ -173,6 +179,12 @@ proc defaultQuadUvs*(): QuadUvs =
 
 proc identityMat4(): Mat4 =
   mat4()
+
+proc invalidBoundsMin(): Vec3 =
+  vec3(Inf.float32, Inf.float32, Inf.float32)
+
+proc invalidBoundsMax(): Vec3 =
+  vec3(-Inf.float32, -Inf.float32, -Inf.float32)
 
 proc uniformsPointer(value: var FrameUniforms): pointer =
   cast[pointer](addr value)
@@ -304,6 +316,18 @@ proc createShadowCubeTexture(
 
 proc finalizeBatch(artist: var Artist3D) {.gcsafe.}
 
+proc resetCurrentBatchBounds(artist: var Artist3D) =
+  artist.currentBatchBoundsMin = invalidBoundsMin()
+  artist.currentBatchBoundsMax = invalidBoundsMax()
+
+proc expandCurrentBatchBounds(artist: var Artist3D; point: Vec3) =
+  artist.currentBatchBoundsMin.x = min(artist.currentBatchBoundsMin.x, point.x)
+  artist.currentBatchBoundsMin.y = min(artist.currentBatchBoundsMin.y, point.y)
+  artist.currentBatchBoundsMin.z = min(artist.currentBatchBoundsMin.z, point.z)
+  artist.currentBatchBoundsMax.x = max(artist.currentBatchBoundsMax.x, point.x)
+  artist.currentBatchBoundsMax.y = max(artist.currentBatchBoundsMax.y, point.y)
+  artist.currentBatchBoundsMax.z = max(artist.currentBatchBoundsMax.z, point.z)
+
 proc textureSlot(
   artist: var Artist3D;
   texture: ptr GPUTexture;
@@ -337,8 +361,11 @@ proc finalizeBatch(artist: var Artist3D) {.gcsafe.} =
     firstIndex: uint32(artist.currentBatchStart),
     indexCount: uint32(artist.currentBatchCount),
     depthTestEnabled: artist.depthTestEnabled,
+    mainPassEnabled: artist.mainPassEnabled,
     sceneLightingEnabled: artist.sceneLightingEnabled,
-    shadowCastingEnabled: artist.shadowCastingEnabled
+    shadowCastingEnabled: artist.shadowCastingEnabled,
+    boundsMin: artist.currentBatchBoundsMin,
+    boundsMax: artist.currentBatchBoundsMax
   )
   for i in 0 ..< artist.maxTextureSlots:
     if i < artist.currentBindings.len:
@@ -351,6 +378,7 @@ proc finalizeBatch(artist: var Artist3D) {.gcsafe.} =
   artist.currentBatchStart = artist.indices.len
   artist.currentBatchCount = 0
   artist.currentBindings.setLen(0)
+  artist.resetCurrentBatchBounds()
 
 proc canAdd(artist: Artist3D; verticesNeeded, indicesNeeded: int): bool =
   artist.vertices.len + verticesNeeded <= artist.maxQuads * 4 and
@@ -573,6 +601,7 @@ proc initArtist3D*(
   result.normal = vec3(0'f32, 0'f32, 1'f32)
   result.filterMode = tfLinear
   result.depthTestEnabled = true
+  result.mainPassEnabled = true
   result.sceneLightingEnabled = true
   result.shadowCastingEnabled = true
   result.gridLightingTexture = nil
@@ -590,6 +619,7 @@ proc initArtist3D*(
   result.fogTint = vec3(0'f32, 0'f32, 0'f32)
   result.fogDensity = 0'f32
   result.cameraPosition = vec3(0'f32, 0'f32, 0'f32)
+  result.resetCurrentBatchBounds()
   result.shadowBoundsMin = vec3(0'f32, 0'f32, 0'f32)
   result.shadowBoundsMax = vec3(0'f32, 0'f32, 0'f32)
   result.shadowBoundsEnabled = false
@@ -675,6 +705,7 @@ proc beginFrame*(artist: var Artist3D) =
   artist.texture = nil
   artist.filterMode = tfLinear
   artist.depthTestEnabled = true
+  artist.mainPassEnabled = true
   artist.sceneLightingEnabled = true
   artist.shadowCastingEnabled = true
   artist.gridLightingTexture = nil
@@ -691,6 +722,7 @@ proc beginFrame*(artist: var Artist3D) =
   artist.fogTint = vec3(0'f32, 0'f32, 0'f32)
   artist.fogDensity = 0'f32
   artist.cameraPosition = vec3(0'f32, 0'f32, 0'f32)
+  artist.resetCurrentBatchBounds()
   artist.shadowBoundsMin = vec3(0'f32, 0'f32, 0'f32)
   artist.shadowBoundsMax = vec3(0'f32, 0'f32, 0'f32)
   artist.shadowBoundsEnabled = false
@@ -736,6 +768,12 @@ proc setDepthTestEnabled*(artist: var Artist3D; enabled: bool) =
     return
   artist.finalizeBatch()
   artist.depthTestEnabled = enabled
+
+proc setMainPassEnabled*(artist: var Artist3D; enabled: bool) =
+  if artist.mainPassEnabled == enabled:
+    return
+  artist.finalizeBatch()
+  artist.mainPassEnabled = enabled
 
 proc setSceneLightingEnabled*(artist: var Artist3D; enabled: bool) =
   if artist.sceneLightingEnabled == enabled:
@@ -854,6 +892,7 @@ proc quadWithLightingPositions*(
   ]
 
   for i in 0 .. 3:
+    artist.expandCurrentBatchBounds(transformed[i])
     artist.vertices.add(Vertex3D(
       position: transformed[i],
       uv: quadUvs[i],
@@ -996,7 +1035,8 @@ proc renderShadowPass(
   layer: uint32;
   viewProjection: Mat4;
   lightPosition: Vec3;
-  lightFarOrZero: float32
+  lightFarOrZero: float32;
+  casterDistanceLimit: float32 = 0'f32
 ) =
   var shadowVertexUniforms = ShadowPassVertexUniforms(viewProjection: viewProjection)
   pushGPUVertexUniformData(
@@ -1055,9 +1095,18 @@ proc renderShadowPass(
   bindGPUVertexBuffers(renderPass, 0, addr vertexBinding, 1)
   bindGPUIndexBuffer(renderPass, addr indexBinding, gpuIndexElementSize32Bit)
 
+  let useCasterDistanceLimit = casterDistanceLimit > 0.000001'f32
   for batch in artist.batches:
     if not batch.depthTestEnabled or not batch.shadowCastingEnabled:
       continue
+    if useCasterDistanceLimit:
+      let clampedPoint = vec3(
+        clamp(lightPosition.x, batch.boundsMin.x, batch.boundsMax.x),
+        clamp(lightPosition.y, batch.boundsMin.y, batch.boundsMax.y),
+        clamp(lightPosition.z, batch.boundsMin.z, batch.boundsMax.z)
+      )
+      if lengthSq(clampedPoint - lightPosition) > casterDistanceLimit * casterDistanceLimit:
+        continue
     drawGPUIndexedPrimitives(
       renderPass,
       batch.indexCount,
@@ -1138,6 +1187,7 @@ proc render*(
         0,
         cascade.viewProjection,
         vec3(0'f32, 0'f32, 0'f32),
+        0'f32,
         0'f32
       )
 
@@ -1148,6 +1198,7 @@ proc render*(
       if not light.castsShadow:
         continue
       let faceMatrices = buildPointLightFaceViewProjections(light.light.position, light.light.radius)
+      let casterDistanceLimit = light.light.radius * max(0'f32, shadowConfig.pointShadowCasterRadiusScale)
       for faceIndex, faceMatrix in faceMatrices:
         artist.renderShadowPass(
           commandBuffer,
@@ -1158,7 +1209,8 @@ proc render*(
           uint32(faceIndex),
           faceMatrix,
           light.light.position,
-          light.light.radius
+          light.light.radius,
+          casterDistanceLimit
         )
       inc shadowTextureIndex
 
@@ -1322,6 +1374,8 @@ proc render*(
   bindGPUIndexBuffer(renderPass, addr indexBinding, gpuIndexElementSize32Bit)
 
   for batch in artist.batches:
+    if not batch.mainPassEnabled:
+      continue
     bindGPUGraphicsPipeline(
       renderPass,
       raw(if batch.depthTestEnabled: artist.pipeline else: artist.overlayPipeline)

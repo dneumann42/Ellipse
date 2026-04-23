@@ -17,6 +17,7 @@ type
     pointDepthBias*: float32
     pointNormalBias*: float32
     pointSoftness*: float32
+    pointShadowCasterRadiusScale*: float32
 
   ShadowCamera* = object
     position*: Vec3
@@ -372,5 +373,6 @@ proc defaultShadowRenderConfig*(): ShadowRenderConfig =
     pointShadowResolution: 512,
     pointDepthBias: 0.015'f32,
     pointNormalBias: 0.03'f32,
-    pointSoftness: 0.03'f32
+    pointSoftness: 0.03'f32,
+    pointShadowCasterRadiusScale: 1.0'f32
   )
