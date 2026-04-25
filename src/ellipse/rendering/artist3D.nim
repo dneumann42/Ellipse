@@ -455,6 +455,35 @@ proc ensureDepthTexture(artist: var Artist3D; width, height: uint32) =
     artist.depthWidth = w
     artist.depthHeight = h
 
+proc createShadowPipeline(artist: var Artist3D) =
+  var shadowVertexBufferDescription = GPUVertexBufferDescription(
+    slot: 0,
+    pitch: uint32(sizeof(Vertex3D)),
+    input_rate: gpuVertexInputRateVertex,
+    instance_step_rate: 0
+  )
+  var shadowVertexAttribute = GPUVertexAttribute(
+    location: 0,
+    buffer_slot: 0,
+    format: gpuVertexElementFormatFloat3,
+    offset: uint32(offsetof(Vertex3D, position))
+  )
+  reset(artist.shadowPipeline)
+  artist.shadowPipeline = createShadowMapPipeline(
+    artist.device,
+    artist.shadowFormat,
+    artist.depthFormat,
+    0'f32,
+    0'f32,
+    0'f32,
+    artist.shadowVertexShader,
+    artist.shadowFragmentShader,
+    addr shadowVertexBufferDescription,
+    1,
+    addr shadowVertexAttribute,
+    1
+  )
+
 proc createPipeline(
   artist: var Artist3D;
   swapchainFormat: GPUTextureFormat
@@ -526,30 +555,7 @@ proc createPipeline(
     addr vertexAttributes[0],
     uint32(vertexAttributes.len)
   )
-
-  var shadowVertexBufferDescription = GPUVertexBufferDescription(
-    slot: 0,
-    pitch: uint32(sizeof(Vertex3D)),
-    input_rate: gpuVertexInputRateVertex,
-    instance_step_rate: 0
-  )
-  var shadowVertexAttribute = GPUVertexAttribute(
-    location: 0,
-    buffer_slot: 0,
-    format: gpuVertexElementFormatFloat3,
-    offset: uint32(offsetof(Vertex3D, position))
-  )
-  artist.shadowPipeline = createShadowMapPipeline(
-    artist.device,
-    artist.shadowFormat,
-    artist.depthFormat,
-    artist.shadowVertexShader,
-    artist.shadowFragmentShader,
-    addr shadowVertexBufferDescription,
-    1,
-    addr shadowVertexAttribute,
-    1
-  )
+  artist.createShadowPipeline()
 
 proc initArtist3D*(
   device: GPUDeviceHandle,
@@ -686,7 +692,7 @@ proc initArtist3D*(
   shadowSamplerInfo.address_mode_v = gpuSamplerAddressModeClampToEdge
   shadowSamplerInfo.address_mode_w = gpuSamplerAddressModeClampToEdge
   result.shadowSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfLinear))
-  result.shadowCubeSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfLinear))
+  result.shadowCubeSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfNearest))
   result.createPipeline(swapchainFormat)
 
 proc beginFrame*(artist: var Artist3D) =
@@ -813,6 +819,10 @@ proc setPointLights*(artist: var Artist3D; lights: openArray[ShadowPointLight]) 
 
 proc setShadowConfig*(artist: var Artist3D; config: ShadowRenderConfig) =
   artist.shadowConfig = config
+  if not raw(artist.shadowVertexShader).isNil and
+      not raw(artist.shadowFragmentShader).isNil and
+      not raw(artist.device).isNil:
+    artist.createShadowPipeline()
 
 proc setShadowBounds*(artist: var Artist3D; boundsMin, boundsMax: Vec3) =
   artist.shadowBoundsMin = boundsMin
@@ -1148,26 +1158,39 @@ proc render*(
   )
   let sunCascades =
     if artist.sunEnabled:
-      if artist.shadowBoundsEnabled:
-        buildDirectionalShadowCascades(
-          shadowCamera,
-          artist.sunDirection,
-          artist.shadowBoundsMin,
-          artist.shadowBoundsMax,
-          clamp(shadowConfig.cascadeCount, 0, maxSunShadowCascades),
-          shadowConfig.maxSunDistance,
-          shadowConfig.splitLambda,
-          shadowConfig.cascadeResolution
-        )
-      else:
-        buildDirectionalShadowCascades(
-          shadowCamera,
-          artist.sunDirection,
-          clamp(shadowConfig.cascadeCount, 0, maxSunShadowCascades),
-          shadowConfig.maxSunDistance,
-          shadowConfig.splitLambda,
-          shadowConfig.cascadeResolution
-        )
+      case shadowConfig.directionalShadowMode
+      of dsmWorldStable:
+        if artist.shadowBoundsEnabled:
+          buildStableDirectionalShadowCascades(
+            artist.sunDirection,
+            artist.shadowBoundsMin,
+            artist.shadowBoundsMax,
+            shadowConfig.maxSunDistance,
+            shadowConfig.cascadeResolution
+          )
+        else:
+          @[]
+      of dsmCameraCascaded:
+        if artist.shadowBoundsEnabled:
+          buildDirectionalShadowCascades(
+            shadowCamera,
+            artist.sunDirection,
+            artist.shadowBoundsMin,
+            artist.shadowBoundsMax,
+            clamp(shadowConfig.cascadeCount, 0, maxSunShadowCascades),
+            shadowConfig.maxSunDistance,
+            shadowConfig.splitLambda,
+            shadowConfig.cascadeResolution
+          )
+        else:
+          buildDirectionalShadowCascades(
+            shadowCamera,
+            artist.sunDirection,
+            clamp(shadowConfig.cascadeCount, 0, maxSunShadowCascades),
+            shadowConfig.maxSunDistance,
+            shadowConfig.splitLambda,
+            shadowConfig.cascadeResolution
+          )
     else:
       @[]
   var shadowedPointLightCount = 0
@@ -1267,7 +1290,7 @@ proc render*(
     shadowConfig.sunDepthBias,
     shadowConfig.sunNormalBias,
     shadowConfig.sunFilterRadiusTexels,
-    sunCascades.len.float32
+    shadowConfig.directionalShadowMode.ord.float32
   )
   lightingUniforms.pointShadowParams = vec4(
     activePointLights.len.float32,

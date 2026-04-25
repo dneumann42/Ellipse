@@ -35,6 +35,9 @@ layout(set = 3, binding = 1, std140) uniform BatchLightingUniforms {
   vec4 flags;
 } batchLighting;
 
+const int DIRECTIONAL_SHADOW_MODE_CAMERA_CASCADED = 0;
+const int DIRECTIONAL_SHADOW_MODE_WORLD_STABLE = 1;
+
 vec4 sampleTexture(int textureIndex, vec2 uv) {
   switch (textureIndex) {
   case 0: return texture(textures3D[0], uv);
@@ -50,14 +53,15 @@ vec4 sampleTexture(int textureIndex, vec2 uv) {
 }
 
 float sampleSunShadow(int cascadeIndex, vec3 worldPosition, vec3 normal) {
-  if (cascadeIndex < 0 || cascadeIndex >= int(lighting.sunShadowParams.w + 0.5)) {
+  int cascadeCount = int(lighting.cascadeSplits.w + 0.5);
+  if (cascadeIndex < 0 || cascadeIndex >= cascadeCount) {
     return 1.0;
   }
 
   vec3 biasedWorldPosition = worldPosition + normal * lighting.sunShadowParams.y;
   vec4 shadowPosition = lighting.sunShadowMatrices[cascadeIndex] * vec4(biasedWorldPosition, 1.0);
   vec3 ndc = shadowPosition.xyz / max(shadowPosition.w, 0.000001);
-  vec3 uvw = ndc * 0.5 + 0.5;
+  vec3 uvw = vec3(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, ndc.z);
   if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 || uvw.z < 0.0 || uvw.z > 1.0) {
     return 1.0;
   }
@@ -92,11 +96,17 @@ void main() {
       float lambert = max(dot(normal, lightDirection), 0.0);
       if (lambert > 0.0) {
         int cascadeIndex = 0;
-        if (int(lighting.cascadeSplits.w + 0.5) > 1 && fragViewDepth > lighting.cascadeSplits.x) {
-          cascadeIndex = 1;
-        }
-        if (int(lighting.cascadeSplits.w + 0.5) > 2 && fragViewDepth > lighting.cascadeSplits.y) {
-          cascadeIndex = 2;
+        int shadowMode = int(lighting.sunShadowParams.w + 0.5);
+        int cascadeCount = int(lighting.cascadeSplits.w + 0.5);
+        if (shadowMode == DIRECTIONAL_SHADOW_MODE_CAMERA_CASCADED) {
+          if (cascadeCount > 1 && fragViewDepth > lighting.cascadeSplits.x) {
+            cascadeIndex = 1;
+          }
+          if (cascadeCount > 2 && fragViewDepth > lighting.cascadeSplits.y) {
+            cascadeIndex = 2;
+          }
+        } else if (shadowMode == DIRECTIONAL_SHADOW_MODE_WORLD_STABLE) {
+          cascadeIndex = 0;
         }
         shadedLight += lighting.sunColorEnabled.rgb *
           lighting.sunDirectionIntensity.w *
@@ -133,7 +143,7 @@ void main() {
         vec3 biasedSamplePosition = fragLightingPosition + normal * lighting.pointLightFalloffShadow[i].z;
         vec3 shadowVector = biasedSamplePosition - lightPosition;
         float currentDepth = length(shadowVector) / radius;
-        vec3 sampleDirection = normalize(shadowVector);
+        vec3 sampleDirection = normalize(vec3(shadowVector.x, -shadowVector.y, shadowVector.z));
         float storedDepth = texture(pointShadowMaps[shadowIndex], sampleDirection).r;
         float delta = currentDepth - storedDepth - lighting.pointShadowParams.z;
         visibility = 1.0 - smoothstep(0.0, lighting.pointShadowParams.w, delta);

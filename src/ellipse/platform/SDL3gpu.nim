@@ -633,6 +633,15 @@ proc uploadToGPUTexture*(
   header: "<SDL3/SDL_gpu.h>"
 .}
 
+proc downloadFromGPUTexture*(
+  copyPass: ptr GPUCopyPass,
+  source: ptr GPUTextureRegion,
+  destination: ptr GPUTextureTransferInfo
+) {.
+  importc: "SDL_DownloadFromGPUTexture",
+  header: "<SDL3/SDL_gpu.h>"
+.}
+
 proc uploadToGPUBuffer*(
   copyPass: ptr GPUCopyPass,
   source: ptr GPUTransferBufferLocation,

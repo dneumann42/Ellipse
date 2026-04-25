@@ -295,10 +295,16 @@ proc createOverlayDepthTexturedPipeline*(
 
   createGPUGraphicsPipeline(device, pipelineInfo)
 
+proc shadowMapCullMode*(): GPUCullMode =
+  gpuCullModeNone
+
 proc createShadowMapPipeline*(
   device: GPUDeviceHandle,
   shadowFormat: GPUTextureFormat,
   depthFormat: GPUTextureFormat,
+  depthBiasConstantFactor: float32,
+  depthBiasClamp: float32,
+  depthBiasSlopeFactor: float32,
   vertexShader: GPUShaderHandle,
   fragmentShader: GPUShaderHandle,
   vertexBufferDescriptions: ptr GPUVertexBufferDescription,
@@ -333,9 +339,14 @@ proc createShadowMapPipeline*(
     primitive_type: gpuPrimitiveTypeTriangleList,
     rasterizer_state: GPURasterizerState(
       fill_mode: gpuFillModeFill,
-      cull_mode: gpuCullModeBack,
+      cull_mode: shadowMapCullMode(),
       front_face: gpuFrontFaceCounterClockwise,
-      enable_depth_bias: false,
+      depth_bias_constant_factor: depthBiasConstantFactor,
+      depth_bias_clamp: depthBiasClamp,
+      depth_bias_slope_factor: depthBiasSlopeFactor,
+      enable_depth_bias: depthBiasConstantFactor != 0'f32 or
+        depthBiasSlopeFactor != 0'f32 or
+        depthBiasClamp != 0'f32,
       enable_depth_clip: true
     ),
     multisample_state: GPUMultisampleState(

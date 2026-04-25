@@ -2,6 +2,8 @@ import std/[math, unittest]
 
 import vmath
 
+import ellipse/platform/SDL3gpu
+import ellipse/rendering/gpupipelines
 import ellipse/rendering/shadowmapping
 
 proc approxEqual(a, b: float32; epsilon = 0.0001'f32): bool =
@@ -26,6 +28,39 @@ proc cameraView(eye, center, up: Vec3): Mat4 =
   )
 
 suite "shadow mapping":
+  test "shadow map pipeline disables face culling for single-sided wall casters":
+    check shadowMapCullMode() == gpuCullModeNone
+
+  test "point light cubemap faces match sampler orientation":
+    check CubeFaceDirections == [
+      vec3(1'f32, 0'f32, 0'f32),
+      vec3(-1'f32, 0'f32, 0'f32),
+      vec3(0'f32, 1'f32, 0'f32),
+      vec3(0'f32, -1'f32, 0'f32),
+      vec3(0'f32, 0'f32, 1'f32),
+      vec3(0'f32, 0'f32, -1'f32)
+    ]
+    check CubeFaceUps == [
+      vec3(0'f32, -1'f32, 0'f32),
+      vec3(0'f32, -1'f32, 0'f32),
+      vec3(0'f32, 0'f32, 1'f32),
+      vec3(0'f32, 0'f32, -1'f32),
+      vec3(0'f32, -1'f32, 0'f32),
+      vec3(0'f32, -1'f32, 0'f32)
+    ]
+
+  test "default directional shadow config enables rasterizer depth bias":
+    let config = defaultShadowRenderConfig()
+
+    check config.directionalShadowMode == dsmCameraCascaded
+    check config.sunRasterDepthBiasConstant == 1.25'f32
+    check config.sunRasterDepthBiasClamp == 0'f32
+    check config.sunRasterDepthBiasSlope == 1.75'f32
+    check config.sunDepthBias > 0'f32
+    check config.sunNormalBias > 0'f32
+    check config.pointDepthBias == 0.00005'f32
+    check config.pointNormalBias == 0'f32
+
   test "cascade splits stay ordered and end at the configured distance":
     let splits = buildCascadeSplits(0.03'f32, 40'f32, 3, 0.65'f32)
 
@@ -75,7 +110,41 @@ suite "shadow mapping":
         for col in 0 .. 3:
           check face[row][col] == face[row][col]
 
-  test "world-bounds cascades stay stable when the camera moves":
+  test "point light face depth uses SDL zero-to-one clip range":
+    let lightPosition = vec3(0'f32, 0'f32, 0'f32)
+    let nearPlane = 0.05'f32
+    let farPlane = 5'f32
+    let face = pointLightFaceViewProjection(lightPosition, farPlane, 0, nearPlane)
+    let nearClip = face * vec4(nearPlane, 0'f32, 0'f32, 1'f32)
+    let farClip = face * vec4(farPlane, 0'f32, 0'f32, 1'f32)
+
+    check (nearClip.z / nearClip.w).approxEqual(0'f32)
+    check (farClip.z / farClip.w).approxEqual(1'f32)
+
+  test "stable world shadow cascade is camera-independent":
+    let boundsMin = vec3(-8'f32, -0.1'f32, -8'f32)
+    let boundsMax = vec3(8'f32, 5'f32, 8'f32)
+    let cascadesA = buildStableDirectionalShadowCascades(
+      normalize(vec3(0.4'f32, -1'f32, 0.2'f32)),
+      boundsMin,
+      boundsMax,
+      40'f32,
+      1024
+    )
+    let cascadesB = buildStableDirectionalShadowCascades(
+      normalize(vec3(0.4'f32, -1'f32, 0.2'f32)),
+      boundsMin,
+      boundsMax,
+      40'f32,
+      1024
+    )
+
+    check cascadesA.len == 1
+    check cascadesB.len == 1
+    check cascadesA[0].viewProjection.approxEqual(cascadesB[0].viewProjection)
+    check cascadesA[0].texelSize.approxEqual(cascadesB[0].texelSize)
+
+  test "camera-cascaded world-bounds shadows respond to camera motion":
     let projection = perspective(70'f32, 16'f32 / 9'f32, 0.03'f32, 100'f32)
     let cameraA = ShadowCamera(
       position: vec3(0'f32, 1.6'f32, -5'f32),
@@ -116,5 +185,5 @@ suite "shadow mapping":
 
     check cascadesA.len == cascadesB.len
     for i in 0 ..< cascadesA.len:
-      check cascadesA[i].viewProjection.approxEqual(cascadesB[i].viewProjection)
-      check cascadesA[i].texelSize.approxEqual(cascadesB[i].texelSize)
+      check not cascadesA[i].viewProjection.approxEqual(cascadesB[i].viewProjection)
+    check not cascadesA[0].viewProjection.approxEqual(cascadesA[1].viewProjection)
