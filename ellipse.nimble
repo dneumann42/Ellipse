@@ -12,7 +12,7 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.8"
-requires "https://github.com:dneumann42/shui"
+requires "https://github.com/dneumann42/shui"
 requires "toml_serialization"
 requires "vmath"
 
