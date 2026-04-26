@@ -12,9 +12,9 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.8"
-requires "shui >= 0.1.0"
-requires "toml_serialization >= 0.2.18"
-requires "vmath >= 2.0.1"
+requires "https://github.com:dneumann42/shui"
+requires "toml_serialization"
+requires "vmath"
 
 task test, "Run automated tests":
   exec "nim c -r tests/test1.nim"
