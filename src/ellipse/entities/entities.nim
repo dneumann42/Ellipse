@@ -88,7 +88,10 @@ proc componentKey[T](_: typedesc[T]): string =
   result = $T
 
 proc componentId*[T](U: typedesc[T], entityManager: EntityManager): ComponentTypeId =
-  result = entityManager.componentIds[U.componentKey()]
+  let key = U.componentKey()
+  if not entityManager.componentIds.contains(key):
+    return
+  result = entityManager.componentIds[key]
 
 proc registerComponent*[T](_: typedesc[T], entityManager: var EntityManager) =
   let key = T.componentKey()
@@ -268,6 +271,9 @@ proc create*[A, B, C, D, E, F, G, H](entities: var EntityManager, a: A, b: B, c:
 proc has*[T](es: EntityManager; e: Entity, _: typedesc[T]): bool =
   if not es.alive(e):
     return
+  let key = T.componentKey()
+  if not es.componentIds.contains(key):
+    return false
   let id = componentId(T, es)
   es.locations[e.index].archetype.signature.contains(id)
 
