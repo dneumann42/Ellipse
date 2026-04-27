@@ -1,10 +1,13 @@
 import std/[hashes]
 
 type
+  ComponentTypeId* = distinct uint16
   ComponentSet* = object
     words: array[4, uint64]
 
 const CacheLine* = 64
+
+proc `==`*(a, b: ComponentTypeId): bool {.borrow.}
 
 proc hash*(s: ComponentSet): Hash =
   var h: Hash = 0
