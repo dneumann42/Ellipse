@@ -1,3 +1,6 @@
+import vmath
+export vmath
+
 import ellipse/[atlas, gui, resources]
 export atlas, gui, resources
 
