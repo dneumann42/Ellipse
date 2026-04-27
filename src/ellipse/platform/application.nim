@@ -253,8 +253,8 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
         id: guiCanvasId,
         width: gApplication.config.width * defaultGuiSupersampleScale,
         height: gApplication.config.height * defaultGuiSupersampleScale,
-        scaleMode: csmStretch,
-        filterMode: tfLinear,
+        scaleMode: Stretch,
+        filterMode: Linear,
         layer: high(int),
         clearColor: FColor(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
       ))
@@ -504,7 +504,7 @@ template generateApplication[T, A](cfg: AppConfig, initialState: T, initialInput
           FColor(r: 0.0, g: 0.0, b: 0.0, a: 1.0)
         else:
           app.config.clearColor),
-        renderTargetLoad
+        Load
       )
     except CatchableError as err:
       reportException("application render failed", err)

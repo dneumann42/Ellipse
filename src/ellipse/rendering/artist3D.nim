@@ -207,10 +207,10 @@ proc samplerInfoForFilter(
 ): GPUSamplerCreateInfo =
   result = samplerInfo
   case filterMode
-  of tfLinear:
+  of Linear:
     result.min_filter = gpuFilterLinear
     result.mag_filter = gpuFilterLinear
-  of tfNearest:
+  of Nearest:
     result.min_filter = gpuFilterNearest
     result.mag_filter = gpuFilterNearest
 
@@ -243,7 +243,7 @@ proc registerTextureFilter(
 
 proc textureFilter(artist: Artist3D; texture: ptr GPUTexture): TextureFilterMode =
   if texture.isNil:
-    return tfLinear
+    return Linear
   if artist.textureFilters.hasKey(texture):
     return artist.textureFilters[texture]
   artist.filterMode
@@ -373,7 +373,7 @@ proc finalizeBatch(artist: var Artist3D) {.gcsafe.} =
       batch.filterModes[i] = artist.currentBindings[i].filterMode
     else:
       batch.textures[i] = raw(artist.whiteTexture)
-      batch.filterModes[i] = tfLinear
+      batch.filterModes[i] = Linear
   artist.batches.add(batch)
   artist.currentBatchStart = artist.indices.len
   artist.currentBatchCount = 0
@@ -605,7 +605,7 @@ proc initArtist3D*(
   result.clipFar = 100'f32
   result.color = vec4(1'f32, 1'f32, 1'f32, 1'f32)
   result.normal = vec3(0'f32, 0'f32, 1'f32)
-  result.filterMode = tfLinear
+  result.filterMode = Linear
   result.depthTestEnabled = true
   result.mainPassEnabled = true
   result.sceneLightingEnabled = true
@@ -682,17 +682,17 @@ proc initArtist3D*(
 
   result.whiteTexture = createWhiteTexture(device)
   result.whiteCubeTexture = createWhiteCubeTexture(device)
-  result.registerTextureFilter(raw(result.whiteTexture), tfLinear)
+  result.registerTextureFilter(raw(result.whiteTexture), Linear)
   let samplerInfo =
     if config.samplerInfo == default(GPUSamplerCreateInfo): defaultSamplerInfo() else: config.samplerInfo
-  result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfLinear))
-  result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfNearest))
+  result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(Linear))
+  result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(Nearest))
   var shadowSamplerInfo = samplerInfo
   shadowSamplerInfo.address_mode_u = gpuSamplerAddressModeClampToEdge
   shadowSamplerInfo.address_mode_v = gpuSamplerAddressModeClampToEdge
   shadowSamplerInfo.address_mode_w = gpuSamplerAddressModeClampToEdge
-  result.shadowSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfLinear))
-  result.shadowCubeSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(tfNearest))
+  result.shadowSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(Linear))
+  result.shadowCubeSampler = createGPUSampler(device, shadowSamplerInfo.samplerInfoForFilter(Nearest))
   result.createPipeline(swapchainFormat)
 
 proc beginFrame*(artist: var Artist3D) =
@@ -709,7 +709,7 @@ proc beginFrame*(artist: var Artist3D) =
   artist.color = vec4(1'f32, 1'f32, 1'f32, 1'f32)
   artist.normal = vec3(0'f32, 0'f32, 1'f32)
   artist.texture = nil
-  artist.filterMode = tfLinear
+  artist.filterMode = Linear
   artist.depthTestEnabled = true
   artist.mainPassEnabled = true
   artist.sceneLightingEnabled = true
@@ -960,7 +960,7 @@ proc createTexture3D*(
   width: int;
   height: int;
   pixels: openArray[uint8];
-  filterMode: TextureFilterMode = tfLinear
+  filterMode: TextureFilterMode = Linear
 ): GPUTextureHandle {.gcsafe.} =
   if width <= 0 or height <= 0:
     raise newException(Artist3DError, "3D texture dimensions must be positive")
@@ -991,7 +991,7 @@ proc createGridLightTexture3D*(
     field.info.textureWidth,
     field.info.textureHeight,
     field.pixels,
-    tfLinear
+    Linear
   )
 
 proc uploadGeometry(artist: var Artist3D; commandBuffer: ptr GPUCommandBuffer) =
@@ -1408,7 +1408,7 @@ proc render*(
       samplers[i] = GPUTextureSamplerBinding(
         texture: batch.textures[i],
         sampler:
-          if batch.filterModes[i] == tfNearest:
+          if batch.filterModes[i] == Nearest:
             raw(artist.nearestSampler)
           else:
             raw(artist.linearSampler)

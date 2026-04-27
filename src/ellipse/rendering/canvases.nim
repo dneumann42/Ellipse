@@ -2,7 +2,7 @@ import std/math
 
 import ../platform/SDL3gpu
 import ../platform/SDL3gpuext
-import ./artist2D
+import artist2D
 
 type
   CanvasError* = object of CatchableError
@@ -10,9 +10,9 @@ type
   RenderCanvasId* = string
 
   CanvasScaleMode* = enum
-    csmContain,
-    csmStretch,
-    csmInteger
+    Contain,
+    Stretch,
+    Integer
 
   RenderCanvasConfig* = object
     id*: RenderCanvasId
@@ -144,17 +144,17 @@ proc canvasCompositeRect*(
   let sourceH = max(config.height, 1).cfloat
 
   case config.scaleMode
-  of csmStretch:
+  of Stretch:
     result = CanvasCompositeRect(
       x: targetRect.x.cfloat,
       y: targetRect.y.cfloat,
       w: destW,
       h: destH
     )
-  of csmContain, csmInteger:
+  of Contain, Integer:
     let containScale = min(destW / sourceW, destH / sourceH)
     let resolvedScale =
-      if config.scaleMode == csmContain or containScale < 1'f32:
+      if config.scaleMode == Contain or containScale < 1'f32:
         containScale
       else:
         max(1'f32, floor(containScale))
@@ -194,7 +194,7 @@ proc clearCanvases*(manager: var CanvasManager; commandBuffer: ptr GPUCommandBuf
       uint32(canvas.config.width),
       uint32(canvas.config.height),
       canvas.config.clearColor,
-      renderTargetClear
+      Clear
     )
 
 proc sortForRendering*(manager: var CanvasManager) =
@@ -213,7 +213,7 @@ proc renderCanvases*(manager: var CanvasManager; commandBuffer: ptr GPUCommandBu
       uint32(canvas.config.width),
       uint32(canvas.config.height),
       canvas.config.clearColor,
-      renderTargetLoad
+      Load
     )
 
 proc composeCanvases*(

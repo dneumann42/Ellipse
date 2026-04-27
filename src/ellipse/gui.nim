@@ -233,7 +233,7 @@ proc drawImageContent(elem: Elem; clip: ScissorRect) =
   sprite.region = image.region
   sprite.hasRegion = true
   sprite.tint = image.tint
-  sprite.filterMode = tfNearest
+  sprite.filterMode = Nearest
   sprite.hasFilterOverride = true
   discard activeArtist.drawSprite(sprite)
 

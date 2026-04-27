@@ -4,7 +4,7 @@ import ../platform/SDL3
 import ../platform/SDL3gpu
 import ../platform/SDL3gpuext
 import ../platform/SDL3ttfext
-import ./[gpupipelines, gpushaders, gpuuploads]
+import gpupipelines, gpushaders, gpuuploads
 
 type
   Artist2DError* = object of CatchableError
@@ -12,12 +12,12 @@ type
   SpriteTexture* = ptr GPUTexture
 
   TextureFilterMode* = enum
-    tfLinear,
-    tfNearest
+    Linear,
+    Nearest
 
   RenderTargetLoadOp* = enum
-    renderTargetLoad,
-    renderTargetClear
+    Load,
+    Clear
 
   ScissorRect* = object
     x*, y*, w*, h*: int
@@ -121,9 +121,9 @@ type
     indexCount: uint32
 
   DrawMode = enum
-    drawModeNone,
-    drawModeSprites,
-    drawModePrimitives
+    None,
+    Sprites,
+    Primitives
 
   DrawCommand = object
     mode: DrawMode
@@ -195,10 +195,10 @@ proc samplerInfoForFilter(
 ): GPUSamplerCreateInfo =
   result = samplerInfo
   case filterMode
-  of tfLinear:
+  of Linear:
     result.min_filter = gpuFilterLinear
     result.mag_filter = gpuFilterLinear
-  of tfNearest:
+  of Nearest:
     result.min_filter = gpuFilterNearest
     result.mag_filter = gpuFilterNearest
 
@@ -211,7 +211,7 @@ proc initSprite2D*(): Sprite2D =
     rotation: 0,
     tint: [1'f32, 1'f32, 1'f32, 1'f32],
     texture: nil,
-    filterMode: tfLinear,
+    filterMode: Linear,
     hasFilterOverride: false,
     region: SpriteTextureRegion(u0: 0, v0: 0, u1: 1, v1: 1),
     hasRegion: false
@@ -246,7 +246,7 @@ proc createSpriteTexture*(
   width: int;
   height: int;
   pixels: openArray[uint8];
-  filterMode: TextureFilterMode = tfLinear
+  filterMode: TextureFilterMode = Linear
 ): GPUTextureHandle {.gcsafe.}
 
 proc defaultPrimitiveVertexCapacity(maxSprites: int): int =
@@ -446,7 +446,7 @@ proc cacheTextTexture(
     return artist.cachedTextEntries[artist.textCache[key]]
 
   let rendered = artist.buildTextPixels(text, pixelSize)
-  let texture = artist.createSpriteTexture(rendered.width, rendered.height, rendered.pixels, tfLinear)
+  let texture = artist.createSpriteTexture(rendered.width, rendered.height, rendered.pixels, Linear)
   let entry = CachedTextEntry(
     key: key,
     texture: raw(texture),
@@ -495,10 +495,10 @@ proc finalizeBatch(artist: var Artist2D) =
       batch.filterModes[i] = artist.currentBindings[i].filterMode
     else:
       batch.textures[i] = raw(artist.whiteTexture)
-      batch.filterModes[i] = tfLinear
+      batch.filterModes[i] = Linear
   artist.batches.add(batch)
   artist.drawCommands.add(DrawCommand(
-    mode: drawModeSprites,
+    mode: Sprites,
     batchIndex: uint32(artist.batches.len - 1),
     scissor: artist.currentScissor
   ))
@@ -515,7 +515,7 @@ proc finalizePrimitiveBatch(artist: var Artist2D) =
     indexCount: uint32(artist.currentPrimitiveCount)
   ))
   artist.drawCommands.add(DrawCommand(
-    mode: drawModePrimitives,
+    mode: Primitives,
     batchIndex: uint32(artist.primitiveBatches.len - 1),
     scissor: artist.currentScissor
   ))
@@ -524,11 +524,11 @@ proc finalizePrimitiveBatch(artist: var Artist2D) =
 
 proc flushActiveBatchForStateChange(artist: var Artist2D) =
   case artist.currentDrawMode
-  of drawModeSprites:
+  of Sprites:
     artist.finalizeBatch()
-  of drawModePrimitives:
+  of Primitives:
     artist.finalizePrimitiveBatch()
-  of drawModeNone:
+  of None:
     discard
 
 proc setQueuedScissor(artist: var Artist2D; scissor: QueuedScissor) =
@@ -539,10 +539,10 @@ proc setQueuedScissor(artist: var Artist2D; scissor: QueuedScissor) =
 
 proc textureFilter(artist: Artist2D; texture: ptr GPUTexture): TextureFilterMode =
   if texture.isNil:
-    return tfLinear
+    return Linear
   if artist.textureFilters.hasKey(texture):
     return artist.textureFilters[texture]
-  tfLinear
+  Linear
 
 proc textureSlot(
   artist: var Artist2D;
@@ -855,9 +855,9 @@ proc initArtist2D*(
   result.currentFontSize = int(result.defaultFontSize)
   let samplerInfo =
     if config.samplerInfo == default(GPUSamplerCreateInfo): defaultSamplerInfo() else: config.samplerInfo
-  result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfLinear))
-  result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(tfNearest))
-  result.registerTextureFilter(raw(result.whiteTexture), tfLinear)
+  result.linearSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(Linear))
+  result.nearestSampler = createGPUSampler(device, samplerInfo.samplerInfoForFilter(Nearest))
+  result.registerTextureFilter(raw(result.whiteTexture), Linear)
 
   let quad = quadVertices()
   uploadBufferData(
@@ -892,7 +892,7 @@ proc beginFrame*(artist: var Artist2D) =
   artist.currentBatchCount = 0
   artist.currentPrimitiveStart = 0
   artist.currentPrimitiveCount = 0
-  artist.currentDrawMode = drawModeNone
+  artist.currentDrawMode = None
   artist.currentScissor = QueuedScissor()
 
 proc setScissor*(artist: var Artist2D; scissor: ScissorRect) =
@@ -913,9 +913,9 @@ proc clearScissor*(artist: var Artist2D) =
   artist.setQueuedScissor(QueuedScissor())
 
 proc drawSprite*(artist: var Artist2D; sprite: Sprite2D): bool =
-  if artist.currentDrawMode == drawModePrimitives:
+  if artist.currentDrawMode == Primitives:
     artist.finalizePrimitiveBatch()
-  artist.currentDrawMode = drawModeSprites
+  artist.currentDrawMode = Sprites
 
   if artist.instances.len >= artist.maxSprites:
     return false
@@ -950,10 +950,10 @@ proc canAddPrimitive(
     artist.primitiveIndices.len + indicesNeeded <= artist.maxPrimitiveIndices
 
 proc beginPrimitiveGeometry(artist: var Artist2D) =
-  if artist.currentDrawMode == drawModeSprites:
+  if artist.currentDrawMode == Sprites:
     artist.finalizeBatch()
-  if artist.currentDrawMode != drawModePrimitives:
-    artist.currentDrawMode = drawModePrimitives
+  if artist.currentDrawMode != Primitives:
+    artist.currentDrawMode = Primitives
     artist.currentPrimitiveStart = artist.primitiveIndices.len
 
 proc addPrimitiveVertex(
@@ -1322,14 +1322,14 @@ proc render*(
   targetWidth: uint32,
   targetHeight: uint32,
   clearColor: FColor = FColor(r: 0.08, g: 0.10, b: 0.13, a: 1.0),
-  loadOp: RenderTargetLoadOp = renderTargetClear
+  loadOp: RenderTargetLoadOp = Clear
 ) =
   case artist.currentDrawMode
-  of drawModeSprites:
+  of Sprites:
     artist.finalizeBatch()
-  of drawModePrimitives:
+  of Primitives:
     artist.finalizePrimitiveBatch()
-  of drawModeNone:
+  of None:
     discard
   artist.uploadInstances(commandBuffer)
   artist.uploadPrimitives(commandBuffer)
@@ -1348,7 +1348,7 @@ proc render*(
     layer_or_depth_plane: 0,
     clear_color: clearColor,
     load_op:
-      if loadOp == renderTargetClear:
+      if loadOp == Clear:
         gpuLoadOpClear
       else:
         gpuLoadOpLoad,
@@ -1401,7 +1401,7 @@ proc render*(
   for command in artist.drawCommands:
     applyScissor(command.scissor)
     case command.mode
-    of drawModeSprites:
+    of Sprites:
       let batch = artist.batches[int(command.batchIndex)]
       bindGPUGraphicsPipeline(renderPass, raw(artist.pipeline))
       bindGPUVertexBuffers(renderPass, 0, addr vertexBindings[0], uint32(vertexBindings.len))
@@ -1412,7 +1412,7 @@ proc render*(
         samplers[i] = GPUTextureSamplerBinding(
           texture: batch.textures[i],
           sampler:
-            if batch.filterModes[i] == tfNearest:
+            if batch.filterModes[i] == Nearest:
               raw(artist.nearestSampler)
             else:
               raw(artist.linearSampler)
@@ -1426,7 +1426,7 @@ proc render*(
         0,
         batch.firstInstance
       )
-    of drawModePrimitives:
+    of Primitives:
       let batch = artist.primitiveBatches[int(command.batchIndex)]
       bindGPUGraphicsPipeline(renderPass, raw(artist.primitivePipeline))
       bindGPUVertexBuffers(renderPass, 0, addr primitiveVertexBinding, 1)
@@ -1439,7 +1439,7 @@ proc render*(
         0,
         0
       )
-    of drawModeNone:
+    of None:
       discard
 
   endGPURenderPass(renderPass)
@@ -1452,7 +1452,7 @@ proc createSpriteTexture*(
   width: int;
   height: int;
   pixels: openArray[uint8];
-  filterMode: TextureFilterMode = tfLinear
+  filterMode: TextureFilterMode = Linear
 ): GPUTextureHandle {.gcsafe.} =
   if width <= 0 or height <= 0:
     raise newException(Artist2DError, "Sprite texture dimensions must be positive")
