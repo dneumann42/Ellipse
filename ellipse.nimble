@@ -5,6 +5,7 @@ author = "dneumann42"
 description = "A game engine"
 license = "Proprietary"
 srcDir = "src"
+bin = @["ellipse"]
 
 # Dependencies
 
@@ -14,3 +15,4 @@ requires "vmath >= 3.0.0"
 requires "chroma >= 1.0.0"
 requires "https://github.com/nim-lang/sdl3"
 requires "plugnim"
+requires "nest"
