@@ -6,10 +6,18 @@ import cameras
 import ../errors
 
 const DefaultCameraID* = "default"
+const
+  CameraUniformSlot = 0'u32
+  DefaultFovY = 70'f32
+  DefaultNearPlane = 0.1'f32
+  DefaultFarPlane = 100'f32
 
 type Vertex* = object
   uv*: IVec2
   position*, normal*: Vec3
+
+type CameraUniforms = object
+  viewProjection: Mat4
 
 const TriangleVertices = [
   Vertex(position: vec3(-1, 1, 0)),
@@ -30,7 +38,7 @@ type
     colorTexture: GPUTexture
     renderTexture: Texture
     textureWidth, textureHeight: uint32
-    allCameras: Table[string, Camera]
+    allCameras: Table[string, cameras.Camera]
     activeCameraID: string
 
   Artist3D* = object
@@ -109,11 +117,14 @@ proc bindGpuVertexBuffers(
 
 proc `=copy`*(artist: var Artist3D, source: Artist3D) {.error.}
 
+proc activeCamera*(artist: Artist3DState): cameras.Camera
+
 proc raiseGpuError(context: string) {.noreturn.} =
   raise SDLException.newException(context & ": " & $sdl3.getError())
 
 proc shaderPath(name: string): string =
-  currentSourcePath().parentDir.parentDir.parentDir / "build" / "shaders" / name
+  currentSourcePath().parentDir.parentDir.parentDir.parentDir / "build" / "shaders" /
+    name
 
 proc loadShaderCode(name: string): string =
   let path = shaderPath(name)
@@ -131,10 +142,31 @@ proc createShader(device: GPUDevice, name: string, stage: GPUShaderStage): GPUSh
     entrypoint: cstring"main",
     format: GPU_SHADERFORMAT_SPIRV.GPUShaderFormat,
     stage: stage,
+    num_uniform_buffers: (if stage == GPU_SHADERSTAGE_VERTEX: 1'u32 else: 0'u32),
   )
   result = createGPUShader(device, addr info)
   if result.isNil:
     raiseGpuError("Failed to create GPU shader")
+
+proc forwardPerspective(fovy, aspect, near, far: float32): Mat4 =
+  let
+    focalLength = 1'f32 / tan(fovy * PI.float32 / 360'f32)
+    depth = far - near
+  result[0, 0] = focalLength / aspect
+  result[1, 1] = focalLength
+  result[2, 2] = far / depth
+  result[2, 3] = 1
+  result[3, 2] = -(near * far) / depth
+
+proc cameraUniforms(artist: Artist3DState): CameraUniforms =
+  let aspect =
+    if artist.textureHeight == 0:
+      1'f32
+    else:
+      artist.textureWidth.float32 / artist.textureHeight.float32
+  let projection =
+    forwardPerspective(DefaultFovY, aspect, DefaultNearPlane, DefaultFarPlane)
+  result.viewProjection = projection * artist.activeCamera.viewMatrix
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -188,7 +220,6 @@ proc uploadTriangleVertices(artist: var Artist3DState) =
   if not submitGPUCommandBuffer(commandBuffer):
     releaseGPUTransferBuffer(artist.device, transferBuffer)
     raiseGpuError("Failed to submit GPU vertex upload")
-  discard waitForGPUIdle(artist.device)
   releaseGPUTransferBuffer(artist.device, transferBuffer)
 
 proc createTrianglePipeline(artist: var Artist3DState) =
@@ -262,7 +293,7 @@ proc initWithRenderer(artist: var Artist3DState, renderer: Renderer) =
     raiseGpuError("SDL renderer is not the GPU renderer")
   artist.createTrianglePipeline()
 
-proc activeCamera*(artist: Artist3DState): Camera =
+proc activeCamera*(artist: Artist3DState): cameras.Camera =
   if not artist.allCameras.hasKey(artist.activeCameraID):
     return
   result = artist.allCameras[artist.activeCameraID]
@@ -270,8 +301,25 @@ proc activeCamera*(artist: Artist3DState): Camera =
 proc init*(T: typedesc[Artist3D], renderer: Renderer): T =
   new result.state
   result.state[].initWithRenderer(renderer)
-  result.state.allCameras[DefaultCameraID] = Camera(vec3(0, 0, -4))
+  result.state.activeCameraID = DefaultCameraID
+  result.state.allCameras[DefaultCameraID] = cameras.Camera(position: vec3(0, 0, -4))
   result.state.allCameras[DefaultCameraID].lookAt(vec3(0, 0, 0))
+
+proc activeCamera*(artist: Artist3D): cameras.Camera =
+  if artist.state.isNil:
+    return
+  artist.state[].activeCamera
+
+proc `activeCamera=`*(artist: Artist3D, camera: cameras.Camera) =
+  if artist.state.isNil:
+    return
+  artist.state.allCameras[artist.state.activeCameraID] = camera
+
+proc setActiveCamera*(artist: Artist3D, id: string, camera: cameras.Camera) =
+  if artist.state.isNil:
+    return
+  artist.state.allCameras[id] = camera
+  artist.state.activeCameraID = id
 
 proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   artist.releaseRenderTarget()
@@ -358,6 +406,10 @@ proc render*(artist: Artist3D) =
     raiseGpuError("Failed to begin GPU render pass")
 
   var binding = GpuBufferBinding(buffer: state.vertexBuffer, offset: 0)
+  var uniforms = state[].cameraUniforms()
+  pushGPUVertexUniformData(
+    commandBuffer, CameraUniformSlot, addr uniforms, sizeof(CameraUniforms).uint32
+  )
   bindGPUGraphicsPipeline(pass, state.pipeline)
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   drawGPUPrimitives(pass, TriangleIndices.len.uint32, 1, 0, 0)
@@ -365,7 +417,6 @@ proc render*(artist: Artist3D) =
 
   if not submitGPUCommandBuffer(commandBuffer):
     raiseGpuError("Failed to submit GPU command buffer")
-  discard waitForGPUIdle(state[].device)
 
   var dst =
     FRect(x: 0, y: 0, w: state.textureWidth.cfloat, h: state.textureHeight.cfloat)

@@ -102,6 +102,15 @@ proc setNestRenderDrawColor(color: screen.Color) =
   let rgba: chromaColors.ColorRGBA = color
   discard setRenderDrawColor(nestRenderer, rgba.r, rgba.g, rgba.b, rgba.a)
 
+template withNestBlendMode(body: untyped) =
+  var previousBlendMode {.gensym.}: BlendMode
+  let hadPreviousBlendMode {.gensym.} =
+    getRenderDrawBlendMode(nestRenderer, previousBlendMode)
+  discard setRenderDrawBlendMode(nestRenderer, BLENDMODE_BLEND)
+  body
+  if hadPreviousBlendMode:
+    discard setRenderDrawBlendMode(nestRenderer, previousBlendMode)
+
 proc resolveNestFontPath(path: string): string =
   if path.len > 0 and fileExists(path):
     return path
@@ -176,7 +185,8 @@ proc nestDrawText(
   if bg.a != 0 and result.w > 0 and result.h > 0:
     var bgRect = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat, h: result.h.cfloat)
     setNestRenderDrawColor(bg)
-    discard renderFillRect(nestRenderer, addr bgRect)
+    withNestBlendMode:
+      discard renderFillRect(nestRenderer, addr bgRect)
   var dst = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat, h: result.h.cfloat)
   discard renderTexture(nestRenderer, texture, nil, addr dst)
   destroyTexture(texture)
@@ -187,26 +197,30 @@ proc nestFillRect(r: coords.Rect, color: screen.Color) {.nimcall.} =
     return
   setNestRenderDrawColor(color)
   var rect = r.toFRect()
-  discard renderFillRect(nestRenderer, addr rect)
+  withNestBlendMode:
+    discard renderFillRect(nestRenderer, addr rect)
 
 proc nestLineRect(r: coords.Rect, color: screen.Color) {.nimcall.} =
   if nestRenderer == nil:
     return
   setNestRenderDrawColor(color)
   var rect = r.toFRect()
-  discard renderRect(nestRenderer, addr rect)
+  withNestBlendMode:
+    discard renderRect(nestRenderer, addr rect)
 
 proc nestDrawLine(x1, y1, x2, y2: int, color: screen.Color) {.nimcall.} =
   if nestRenderer == nil:
     return
   setNestRenderDrawColor(color)
-  discard renderLine(nestRenderer, x1.cfloat, y1.cfloat, x2.cfloat, y2.cfloat)
+  withNestBlendMode:
+    discard renderLine(nestRenderer, x1.cfloat, y1.cfloat, x2.cfloat, y2.cfloat)
 
 proc nestDrawPoint(x, y: int, color: screen.Color) {.nimcall.} =
   if nestRenderer == nil:
     return
   setNestRenderDrawColor(color)
-  discard renderPoint(nestRenderer, x.cfloat, y.cfloat)
+  withNestBlendMode:
+    discard renderPoint(nestRenderer, x.cfloat, y.cfloat)
 
 proc nestLoadImage(path: string): screen.Image {.nimcall.} =
   screen.Image(0)
@@ -335,8 +349,12 @@ template buildApplication*(appConfig: ApplicationConfig) =
       sdl3.quit()
 
     var app = Application()
-    app.window =
-      createWindow("Ellipse", 1280, 720, WINDOW_RESIZABLE or WINDOW_HIGH_PIXEL_DENSITY)
+    app.window = createWindow(
+      cstring(appConfig.appname),
+      appConfig.width.cint,
+      appConfig.height.cint,
+      WINDOW_RESIZABLE or WINDOW_HIGH_PIXEL_DENSITY,
+    )
     if app.window.isNil:
       raiseError("Failed to create window")
     attempt showWindow(app.window), "Failed to show window"
@@ -348,6 +366,8 @@ template buildApplication*(appConfig: ApplicationConfig) =
     app.installNestDriver()
 
     var gui {.inject.} = createNest()
+    var artist {.inject.} = Artist3D.init(app.renderer)
+
     generatePluginFunctionCalls(load)
     sdlApplication:
       generatePluginFunctionCalls(event)
@@ -358,3 +378,4 @@ template buildApplication*(appConfig: ApplicationConfig) =
       renderNest(gui):
         generatePluginFunctionCalls(ui)
       attempt renderPresent(app.renderer), "Failed to present renderer"
+      delay(16)
