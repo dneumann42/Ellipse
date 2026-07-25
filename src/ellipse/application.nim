@@ -9,12 +9,18 @@ import nest/[coords, screen]
 export plugnim
 export nest except Event, update, draw
 
+import artist3d
 import errors
 
 type
   NestFontSlot = object
     font: sdl3_ttf.Font
     metrics: screen.FontMetrics
+
+  ApplicationConfig* = object
+    appname*, appversion*: string
+    width* = 1280
+    height* = 720
 
 const
   MaxDeltaTime = 0.25'f64
@@ -64,8 +70,8 @@ proc secondsBetween(startCounter, endCounter, frequency: uint64): float64 =
   float64(endCounter - startCounter) / float64(frequency)
 
 proc configureSdlVideoDriver() =
-  if getEnv("SDL_VIDEO_DRIVER").len == 0 and
-      getEnv("SDL_VIDEODRIVER").len == 0 and getEnv("WAYLAND_DISPLAY").len > 0:
+  if getEnv("SDL_VIDEO_DRIVER").len == 0 and getEnv("SDL_VIDEODRIVER").len == 0 and
+      getEnv("WAYLAND_DISPLAY").len > 0:
     discard setHint("SDL_VIDEO_DRIVER", "wayland")
 
 template update(dt: float64) =
@@ -76,7 +82,6 @@ template draw(rendererArg: Renderer) =
   attempt setRenderDrawColor(renderer, 12, 14, 18, 255), "Failed to set draw color"
   attempt renderClear(renderer), "Failed to clear renderer"
   generatePluginFunctionCalls(draw)
-  attempt renderPresent(renderer), "Failed to present renderer"
 
 template nestEvent(event: sdl3.Event) =
   generatePluginFunctionCalls(nestEvent)
@@ -109,8 +114,9 @@ proc resolveNestFontPath(path: string): string =
     if fileExists(candidate):
       return candidate
 
-proc nestOpenFont(path: string, size: int,
-    metrics: var screen.FontMetrics): screen.Font {.nimcall.} =
+proc nestOpenFont(
+    path: string, size: int, metrics: var screen.FontMetrics
+): screen.Font {.nimcall.} =
   let resolved = resolveNestFontPath(path)
   if resolved.len == 0:
     return screen.Font(0)
@@ -151,14 +157,14 @@ proc nestMeasureText(font: screen.Font, text: string): screen.TextExtent {.nimca
   discard sdl3_ttf.getStringSize(fontPtr, cstring(text), 0, width, height)
   screen.TextExtent(w: width.int, h: height.int)
 
-proc nestDrawText(font: screen.Font, x, y: int, text: string, fg,
-    bg: screen.Color): screen.TextExtent {.nimcall.} =
+proc nestDrawText(
+    font: screen.Font, x, y: int, text: string, fg, bg: screen.Color
+): screen.TextExtent {.nimcall.} =
   let fontPtr = nestFontPtr(font)
   if fontPtr == nil or nestRenderer == nil or text.len == 0:
     return screen.TextExtent()
   let fgRgba: chromaColors.ColorRGBA = fg
-  let surface =
-    sdl3_ttf.renderTextBlended(fontPtr, cstring(text), 0, fgRgba.toSdlColor)
+  let surface = sdl3_ttf.renderTextBlended(fontPtr, cstring(text), 0, fgRgba.toSdlColor)
   if surface == nil:
     return screen.TextExtent()
   let texture = createTextureFromSurface(nestRenderer, surface)
@@ -168,8 +174,7 @@ proc nestDrawText(font: screen.Font, x, y: int, text: string, fg,
   discard setTextureBlendMode(texture, BLENDMODE_BLEND)
   result = nestMeasureText(font, text)
   if bg.a != 0 and result.w > 0 and result.h > 0:
-    var bgRect = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat,
-        h: result.h.cfloat)
+    var bgRect = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat, h: result.h.cfloat)
     setNestRenderDrawColor(bg)
     discard renderFillRect(nestRenderer, addr bgRect)
   var dst = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat, h: result.h.cfloat)
@@ -264,10 +269,10 @@ proc installNestDriver*(app: Application) =
     imageSize: nestImageSize,
   )
 
-proc initNest*(ui: var UI, width = 1280, height = 720) =
-  ui = UI.init()
-  ui.initContext(width, height)
-  ui.loadFont("font", "", 18)
+proc createNest*(width = 1280, height = 720): UI =
+  result = UI.init()
+  result.initContext(width, height)
+  result.loadFont("font", "", 18)
 
 proc handleNestEvent*(ui: var UI, event: sdl3.Event) =
   let eventType = uint32(event.common.`type`)
@@ -276,7 +281,8 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event) =
     ui.markAllDirty()
   elif eventType == uint32(EVENT_MOUSE_MOTION):
     ui.mouseMove(event.motion.x.int, event.motion.y.int)
-  elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and event.button.button == BUTTON_LEFT:
+  elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
+      event.button.button == BUTTON_LEFT:
     ui.mouseMove(event.button.x.int, event.button.y.int)
     ui.mouseDown()
     ui.requestRedrawAfter(0)
@@ -316,7 +322,7 @@ template sdlApplication(events, step) =
       break
     step
 
-template buildApplication*() =
+template buildApplication*(appConfig: ApplicationConfig) =
   generatePluginContext()
   proc start() =
     configureSdlVideoDriver()
@@ -334,16 +340,21 @@ template buildApplication*() =
     if app.window.isNil:
       raiseError("Failed to create window")
     attempt showWindow(app.window), "Failed to show window"
-    app.renderer = sdl3.createRenderer(app.window, nil)
+    app.renderer = sdl3.createRenderer(app.window, cstring"gpu")
     if app.renderer.isNil:
       raiseError("Failed to create renderer")
     attempt setRenderVSync(app.renderer, 0), "Failed to disable vsync"
+    installArtist3DRenderer(app.renderer)
     app.installNestDriver()
 
+    var gui {.inject.} = createNest()
     generatePluginFunctionCalls(load)
-
     sdlApplication:
-      nestEvent(event)
+      generatePluginFunctionCalls(event)
+      handleNestEvent(gui, event)
     do:
       update(dt)
       draw(app.renderer)
+      renderNest(gui):
+        generatePluginFunctionCalls(ui)
+      attempt renderPresent(app.renderer), "Failed to present renderer"

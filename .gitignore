@@ -6,3 +6,6 @@ htmldocs/
 nimble.develop
 nimble.paths
 nimbledeps
+*.spv
+/ellipse
+*.out
