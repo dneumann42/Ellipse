@@ -1,9 +1,11 @@
-import std/[os, strformat]
+import std/[os, strformat, tables]
 
-import sdl3
-import vmath
+import sdl3, vmath
 
-import errors
+import cameras
+import ../errors
+
+const DefaultCameraID* = "default"
 
 type Vertex* = object
   uv*: IVec2
@@ -28,6 +30,8 @@ type
     colorTexture: GPUTexture
     renderTexture: Texture
     textureWidth, textureHeight: uint32
+    allCameras: Table[string, Camera]
+    activeCameraID: string
 
   Artist3D* = object
     state: ref Artist3DState
@@ -102,9 +106,6 @@ proc bindGpuVertexBuffers(
   bindings: ptr GpuBufferBinding,
   numBindings: uint32,
 ) {.cdecl, dynlib: LibName, importc: "SDL_BindGPUVertexBuffers".}
-
-proc init*(T: typedesc[Artist3D]): T =
-  new result.state
 
 proc `=copy`*(artist: var Artist3D, source: Artist3D) {.error.}
 
@@ -261,9 +262,16 @@ proc initWithRenderer(artist: var Artist3DState, renderer: Renderer) =
     raiseGpuError("SDL renderer is not the GPU renderer")
   artist.createTrianglePipeline()
 
+proc activeCamera*(artist: Artist3DState): Camera =
+  if not artist.allCameras.hasKey(artist.activeCameraID):
+    return
+  result = artist.allCameras[artist.activeCameraID]
+
 proc init*(T: typedesc[Artist3D], renderer: Renderer): T =
   new result.state
   result.state[].initWithRenderer(renderer)
+  result.state.allCameras[DefaultCameraID] = Camera(vec3(0, 0, -4))
+  result.state.allCameras[DefaultCameraID].lookAt(vec3(0, 0, 0))
 
 proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   artist.releaseRenderTarget()

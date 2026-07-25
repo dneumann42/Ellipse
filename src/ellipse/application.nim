@@ -9,7 +9,7 @@ import nest/[coords, screen]
 export plugnim
 export nest except Event, update, draw
 
-import artist3d
+import rendering/artist3D
 import errors
 
 type
