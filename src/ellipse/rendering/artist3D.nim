@@ -34,6 +34,11 @@ type
 
   TransformUniforms = object
     modelViewProjection: Mat4
+    model: Mat4
+
+  LightingUniforms = object
+    cameraPosition: Vec3
+    padding: float32
 
 type
   Artist3DState = object
@@ -44,7 +49,7 @@ type
     fragmentShader: GPUShader
     meshes: Table[MeshID, Mesh]
     defaultModel: Model
-    colorTexture: GPUTexture
+    colorTexture, depthTexture: GPUTexture
     renderTexture: Texture
     textureWidth, textureHeight: uint32
     allCameras: Table[string, cameras.Camera]
@@ -93,6 +98,18 @@ type
     padding1: uint8
     padding2: uint8
 
+  GpuDepthStencilTargetInfo {.bycopy.} = object
+    texture: GPUTexture
+    clear_depth: cfloat
+    load_op: GPULoadOp
+    store_op: GPUStoreOp
+    stencil_load_op: GPULoadOp
+    stencil_store_op: GPUStoreOp
+    cycle: bool
+    clear_stencil: uint8
+    padding1: uint8
+    padding2: uint8
+
   GpuBufferBinding {.bycopy.} = object
     buffer: GPUBuffer
     offset: uint32
@@ -114,7 +131,7 @@ proc beginGpuRenderPass(
   commandBuffer: GPUCommandBuffer,
   colorTargetInfos: ptr GpuColorTargetInfo,
   numColorTargets: uint32,
-  depthStencilTargetInfo: ptr GPUDepthStencilTargetInfo,
+  depthStencilTargetInfo: ptr GpuDepthStencilTargetInfo,
 ): GPURenderPass {.cdecl, dynlib: LibName, importc: "SDL_BeginGPURenderPass".}
 
 proc bindGpuVertexBuffers(
@@ -158,7 +175,7 @@ proc createShader(device: GPUDevice, name: string, stage: GPUShaderStage): GPUSh
     entrypoint: cstring"main",
     format: GPU_SHADERFORMAT_SPIRV.GPUShaderFormat,
     stage: stage,
-    num_uniform_buffers: (if stage == GPU_SHADERSTAGE_VERTEX: 1'u32 else: 0'u32),
+    num_uniform_buffers: 1,
   )
   result = createGPUShader(device, addr info)
   if result.isNil:
@@ -194,7 +211,11 @@ proc viewProjection(artist: Artist3DState): Mat4 =
   projection * artist.activeCamera.viewMatrix
 
 proc transformUniforms(artist: Artist3DState, modelTransform: Mat4): TransformUniforms =
+  result.model = modelTransform
   result.modelViewProjection = artist.viewProjection * modelTransform
+
+proc lightingUniforms(artist: Artist3DState): LightingUniforms =
+  result.cameraPosition = artist.activeCamera.position
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -203,6 +224,9 @@ proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.colorTexture.isNil:
     releaseGPUTexture(artist.device, artist.colorTexture)
     artist.colorTexture = nil
+  if not artist.depthTexture.isNil:
+    releaseGPUTexture(artist.device, artist.depthTexture)
+    artist.depthTexture = nil
   artist.textureWidth = 0
   artist.textureHeight = 0
 
@@ -360,7 +384,13 @@ proc createTrianglePipeline(artist: var Artist3DState) =
       buffer_slot: 0,
       format: GPU_VERTEXELEMENTFORMAT_FLOAT3,
       offset: offsetof(Vertex, position).uint32,
-    )
+    ),
+    GPUVertexAttribute(
+      location: 1,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT3,
+      offset: offsetof(Vertex, normal).uint32,
+    ),
   ]
   var colorTarget = GPUColorTargetDescription(
     format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
@@ -376,6 +406,8 @@ proc createTrianglePipeline(artist: var Artist3DState) =
     color_target_descriptions:
       cast[ptr UncheckedArray[GPUColorTargetDescription]](addr colorTarget),
     num_color_targets: 1,
+    depth_stencil_format: GPU_TEXTUREFORMAT_D16_UNORM,
+    has_depth_stencil_target: true,
   )
   var pipelineInfo = GpuGraphicsPipelineCreateInfo(
     vertex_shader: artist.vertexShader,
@@ -391,10 +423,15 @@ proc createTrianglePipeline(artist: var Artist3DState) =
     primitive_type: GPU_PRIMITIVETYPE_TRIANGLELIST,
     rasterizer_state: GPURasterizerState(
       fill_mode: GPU_FILLMODE_FILL,
-      cull_mode: GPU_CULLMODE_NONE,
-      front_face: GPU_FRONTFACE_COUNTER_CLOCKWISE,
+      cull_mode: GPU_CULLMODE_BACK,
+      front_face: GPU_FRONTFACE_CLOCKWISE,
     ),
     multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    depth_stencil_state: GPUDepthStencilState(
+      compare_op: GPU_COMPAREOP_LESS_OR_EQUAL,
+      enable_depth_test: true,
+      enable_depth_write: true,
+    ),
     target_info: targetInfo,
   )
   artist.pipeline = createGpuGraphicsPipeline(artist.device, addr pipelineInfo)
@@ -560,6 +597,21 @@ proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   if artist.colorTexture.isNil:
     raiseGpuError("Failed to create GPU color target")
 
+  var depthTextureInfo = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_2D,
+    format: GPU_TEXTUREFORMAT_D16_UNORM,
+    usage: GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET.GPUTextureUsageFlags,
+    width: width,
+    height: height,
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  artist.depthTexture = createGPUTexture(artist.device, addr depthTextureInfo)
+  if artist.depthTexture.isNil:
+    artist.releaseRenderTarget()
+    raiseGpuError("Failed to create GPU depth target")
+
   let props = createProperties()
   if props == 0:
     raiseGpuError("Failed to create texture properties")
@@ -595,8 +647,8 @@ proc ensureReady(artist: var Artist3DState) =
     raiseGpuError("Failed to get render output size")
   if width <= 0 or height <= 0:
     return
-  if artist.colorTexture.isNil or artist.textureWidth != width.uint32 or
-      artist.textureHeight != height.uint32:
+  if artist.colorTexture.isNil or artist.depthTexture.isNil or
+      artist.textureWidth != width.uint32 or artist.textureHeight != height.uint32:
     artist.createRenderTarget(width.uint32, height.uint32)
 
 proc `=destroy`*(artist: var Artist3D) =
@@ -620,8 +672,12 @@ proc drawModel(
   var binding = GpuBufferBinding(buffer: mesh.vertexBuffer, offset: 0)
   var indexBinding = GpuBufferBinding(buffer: mesh.indexBuffer, offset: 0)
   var uniforms = state.transformUniforms(extraTransform * model.transform)
+  var lighting = state.lightingUniforms()
   pushGPUVertexUniformData(
     commandBuffer, CameraUniformSlot, addr uniforms, sizeof(TransformUniforms).uint32
+  )
+  pushGPUFragmentUniformData(
+    commandBuffer, 0, addr lighting, sizeof(LightingUniforms).uint32
   )
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
@@ -648,7 +704,16 @@ proc render*(artist: Artist3D, models: openArray[Model], transform = identityMat
     load_op: GPU_LOADOP_CLEAR,
     store_op: GPU_STOREOP_STORE,
   )
-  let pass = beginGpuRenderPass(commandBuffer, addr colorTargetInfo, 1, nil)
+  var depthTargetInfo = GpuDepthStencilTargetInfo(
+    texture: state.depthTexture,
+    clear_depth: 1.0,
+    load_op: GPU_LOADOP_CLEAR,
+    store_op: GPU_STOREOP_DONT_CARE,
+    stencil_load_op: GPU_LOADOP_DONT_CARE,
+    stencil_store_op: GPU_STOREOP_DONT_CARE,
+  )
+  let pass = beginGpuRenderPass(commandBuffer, addr colorTargetInfo, 1,
+      addr depthTargetInfo)
   if pass.isNil:
     discard cancelGPUCommandBuffer(commandBuffer)
     raiseGpuError("Failed to begin GPU render pass")

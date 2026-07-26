@@ -11,6 +11,7 @@ export nest except Event, update, draw
 
 import rendering/artist3D
 import errors
+import inputs as ellipseInputs
 
 type
   NestFontSlot = object
@@ -38,6 +39,9 @@ var
   nestPickedFiles: Table[WidgetID, string]
   nestFilePickerErrors: Table[WidgetID, string]
   nestFallbackFilePickers: Table[WidgetID, osproc.Process]
+  nestCachedDrawCommands: seq[screen.DrawCommand]
+  hasApplicationRedraw: bool
+  applicationRedrawTicks: uint64
 
 type Application* = object
   window: Window
@@ -72,6 +76,34 @@ template attempt(succ: bool, context: string) =
 proc secondsBetween(startCounter, endCounter, frequency: uint64): float64 =
   float64(endCounter - startCounter) / float64(frequency)
 
+proc requestFrameAfter*(ms: int) =
+  let ticks = sdl3.getTicks() + max(ms, 0).uint64
+  if not hasApplicationRedraw or ticks < applicationRedrawTicks:
+    applicationRedrawTicks = ticks
+    hasApplicationRedraw = true
+
+proc requestFrame*() =
+  requestFrameAfter(0)
+
+proc applicationRedrawDelayMs(): int =
+  if not hasApplicationRedraw:
+    return -1
+  let now = sdl3.getTicks()
+  if applicationRedrawTicks <= now:
+    return 0
+  min(applicationRedrawTicks - now, int32.high.uint64).int
+
+proc clearDueApplicationRedraw() =
+  if hasApplicationRedraw and applicationRedrawTicks <= sdl3.getTicks():
+    hasApplicationRedraw = false
+
+proc nextRedrawDelay(a, b: int): int =
+  if a < 0:
+    return b
+  if b < 0:
+    return a
+  min(a, b)
+
 proc configureSdlVideoDriver() =
   if getEnv("SDL_VIDEO_DRIVER").len == 0 and getEnv("SDL_VIDEODRIVER").len == 0 and
       getEnv("WAYLAND_DISPLAY").len > 0:
@@ -97,6 +129,7 @@ proc startNestFallbackFilePicker(id: WidgetID, defaultLocation: string): bool =
       nestFallbackFilePickers[id] = startProcess(
         zenity, args = args, options = {poStdErrToStdOut}
       )
+      requestFrameAfter(100)
       return true
 
     let kdialog = findExe("kdialog")
@@ -108,6 +141,7 @@ proc startNestFallbackFilePicker(id: WidgetID, defaultLocation: string): bool =
       nestFallbackFilePickers[id] = startProcess(
         kdialog, args = args, options = {poStdErrToStdOut}
       )
+      requestFrameAfter(100)
       return true
 
     let yad = findExe("yad")
@@ -119,6 +153,7 @@ proc startNestFallbackFilePicker(id: WidgetID, defaultLocation: string): bool =
       nestFallbackFilePickers[id] = startProcess(
         yad, args = args, options = {poStdErrToStdOut}
       )
+      requestFrameAfter(100)
       return true
 
     nestFilePickerErrors[id] =
@@ -131,8 +166,10 @@ proc startNestFallbackFilePicker(id: WidgetID, defaultLocation: string): bool =
 
 proc pollNestFallbackFilePickers() =
   var finished: seq[WidgetID]
+  var hasRunningPicker = false
   for id, process in nestFallbackFilePickers.mpairs:
     if process.running:
+      hasRunningPicker = true
       continue
     let output = process.outputStream.readAll.strip
     let exitCode = process.peekExitCode()
@@ -147,6 +184,8 @@ proc pollNestFallbackFilePickers() =
       echo "file picker error: ", nestFilePickerErrors[id]
   for id in finished:
     nestFallbackFilePickers.del id
+  if hasRunningPicker:
+    requestFrameAfter(100)
 
 proc nestOpenFile(id: WidgetID, defaultLocation: cstring): bool {.cdecl.} =
   try:
@@ -581,7 +620,6 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
 template renderNest*(ui: var UI, body: untyped) =
   ui.beginInputFrame()
   ui.setDrawTicks(sdl3.getTicks().int)
-  ui.markAllDirty()
   var drawCommands {.inject.}: seq[screen.DrawCommand]
   ui.setDrawCommandRelays(addr drawCommands, nestMeasureText)
   pollNestFallbackFilePickers()
@@ -590,8 +628,13 @@ template renderNest*(ui: var UI, body: untyped) =
   body
   ui.setDrawCommandRelays(nil, nil)
   ui.setIO(IO())
-  replayDrawCommands(drawCommands)
+  if ui.redrewFrame():
+    nestCachedDrawCommands = drawCommands
+  replayDrawCommands(nestCachedDrawCommands)
   ui.finishInputFrame()
+
+proc renderCachedNest*() =
+  replayDrawCommands(nestCachedDrawCommands)
 
 template sdlApplication(events, step) =
   let frequency = getPerformanceFrequency()
@@ -599,6 +642,7 @@ template sdlApplication(events, step) =
     running {.inject.} = true
     previousTime = getPerformanceCounter()
     event: sdl3.Event
+    inputs {.inject.} = InputMap.init()
   while running:
     let frameStart = getPerformanceCounter()
     let dt {.inject.} =
@@ -607,11 +651,13 @@ template sdlApplication(events, step) =
     while pollEvent(event):
       if event.`type` == EVENT_QUIT:
         running = false
+      inputs.handleEvent(event)
       let event {.inject.} = event
       events
     if not running:
       break
     step
+    inputs.finishFrame()
 
 template buildApplication*(appConfig: ApplicationConfig) =
   generatePluginContext()
@@ -646,15 +692,55 @@ template buildApplication*(appConfig: ApplicationConfig) =
 
     var gui {.inject.} = createNest()
     var artist {.inject.} = Artist3D.init(app.renderer)
+    var inputs {.inject.} = InputMap.init()
 
     generatePluginFunctionCalls(load)
-    sdlApplication:
-      generatePluginFunctionCalls(event)
-      handleNestEvent(gui, event)
-    do:
+    let frequency = getPerformanceFrequency()
+    var
+      running {.inject.} = true
+      previousTime = getPerformanceCounter()
+      sdlEvent: sdl3.Event
+      firstFrame = true
+    while running:
+      var hadEvent = false
+      hadEvent = waitEventTimeout(sdlEvent, 0)
+
+      if hadEvent:
+        if sdlEvent.`type` == EVENT_QUIT:
+          running = false
+        inputs.handleEvent(sdlEvent)
+        let event {.inject.} = sdlEvent
+        generatePluginFunctionCalls(event)
+        handleNestEvent(gui, event)
+        while pollEvent(sdlEvent):
+          if sdlEvent.`type` == EVENT_QUIT:
+            running = false
+          inputs.handleEvent(sdlEvent)
+          let event {.inject.} = sdlEvent
+          generatePluginFunctionCalls(event)
+          handleNestEvent(gui, event)
+      if not running:
+        break
+
+      let
+        appDue = applicationRedrawDelayMs() == 0
+        uiDue = gui.redrawDelayMs() == 0
+      if appDue:
+        clearDueApplicationRedraw()
+      if uiDue:
+        gui.clearRedrawRequest()
+
+      let frameStart = getPerformanceCounter()
+      let dt {.inject.} =
+        min(secondsBetween(previousTime, frameStart, frequency), MaxDeltaTime)
+      previousTime = frameStart
       update(dt)
       draw(app.renderer)
-      renderNest(gui):
-        generatePluginFunctionCalls(ui)
+      if firstFrame or hadEvent or uiDue:
+        renderNest(gui):
+          generatePluginFunctionCalls(ui)
+      else:
+        renderCachedNest()
       attempt renderPresent(app.renderer), "Failed to present renderer"
-      delay(16)
+      inputs.finishFrame()
+      firstFrame = false
