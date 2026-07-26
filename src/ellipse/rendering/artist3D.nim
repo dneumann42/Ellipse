@@ -17,13 +17,17 @@ const
 
 type Vertex* = object
   position*, normal*: Vec3
-  uv*: Vec2
+  uv*, splatUv*: Vec2
+  splatIndices*, splatWeights*: Vec4
 
 type
   MeshID* = string
 
   MeshRenderMode* = enum
     SolidMesh, WireframeMesh
+
+  TextureSampling* = enum
+    Single, Splat
 
   RenderOptions* = object
     mode*: MeshRenderMode
@@ -36,6 +40,8 @@ type
     texture*: TextureResourceHandle
     baseColor*: Vec3
     useTexture*: bool
+    textureSampling*: TextureSampling
+    atlasColumns*, atlasRows*: int
 
   Model* = object
     meshID*: MeshID
@@ -64,6 +70,7 @@ type
     cameraPadding: float32
     baseColor: Vec3
     useTexture: float32
+    splat: Vec4
 
 type
   Artist3DState = object
@@ -315,6 +322,12 @@ proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
         1'f32
       else:
         0'f32
+    result.splat = vec4(
+      if material.textureSampling == Splat: 1'f32 else: 0'f32,
+      max(material.atlasColumns, 1).float32,
+      max(material.atlasRows, 1).float32,
+      0,
+    )
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -675,6 +688,24 @@ proc createTrianglePipeline(
       buffer_slot: 0,
       format: GPU_VERTEXELEMENTFORMAT_FLOAT2,
       offset: offsetof(Vertex, uv).uint32,
+    ),
+    GPUVertexAttribute(
+      location: 3,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT2,
+      offset: offsetof(Vertex, splatUv).uint32,
+    ),
+    GPUVertexAttribute(
+      location: 4,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT4,
+      offset: offsetof(Vertex, splatIndices).uint32,
+    ),
+    GPUVertexAttribute(
+      location: 5,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT4,
+      offset: offsetof(Vertex, splatWeights).uint32,
     ),
   ]
   var colorTarget = GPUColorTargetDescription(

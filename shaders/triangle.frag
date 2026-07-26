@@ -3,6 +3,9 @@
 layout(location = 0) in vec3 vWorldPosition;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUv;
+layout(location = 3) in vec2 vSplatUv;
+layout(location = 4) in vec4 vSplatIndices;
+layout(location = 5) in vec4 vSplatWeights;
 
 layout(location = 0) out vec4 outColor;
 
@@ -12,7 +15,30 @@ layout(set = 3, binding = 0) uniform Lighting {
   vec3 uCameraPosition;
   vec3 uBaseColor;
   float uUseTexture;
+  vec4 uSplat;
 };
+
+vec3 atlasSample(float tileIndex) {
+  float columns = max(uSplat.y, 1.0);
+  float rows = max(uSplat.z, 1.0);
+  float tile = clamp(floor(tileIndex + 0.5), 0.0, columns * rows - 1.0);
+  vec2 cell = vec2(mod(tile, columns), floor(tile / columns));
+  vec2 uv = (cell + fract(vSplatUv)) / vec2(columns, rows);
+  return texture(uTexture, uv).rgb;
+}
+
+vec3 splatSample() {
+  vec4 weights = max(vSplatWeights, vec4(0.0));
+  float total = dot(weights, vec4(1.0));
+  if (total <= 0.0001) {
+    return texture(uTexture, vUv).rgb;
+  }
+  weights /= total;
+  return atlasSample(vSplatIndices.x) * weights.x +
+    atlasSample(vSplatIndices.y) * weights.y +
+    atlasSample(vSplatIndices.z) * weights.z +
+    atlasSample(vSplatIndices.w) * weights.w;
+}
 
 void main() {
   vec3 normal = normalize(vNormal);
@@ -22,7 +48,9 @@ void main() {
 
   float diffuse = max(dot(normal, lightDirection), 0.0);
   float specular = pow(max(dot(viewDirection, reflectDirection), 0.0), 32.0);
-  vec3 baseColor = uUseTexture > 0.5 ? texture(uTexture, vUv).rgb : uBaseColor;
+  vec3 baseColor = uUseTexture > 0.5
+    ? (uSplat.x > 0.5 ? splatSample() : texture(uTexture, vUv).rgb)
+    : uBaseColor;
   vec3 color = baseColor * (0.22 + diffuse * 0.72) + vec3(1.0, 0.9, 0.68) * specular * 0.35;
   outColor = vec4(color, 1.0);
 }

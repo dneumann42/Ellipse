@@ -572,7 +572,9 @@ proc nestDrawPoint(x, y: int, color: screen.Color) {.nimcall.} =
     discard renderPoint(nestRenderer, x.cfloat, y.cfloat)
 
 proc nestLoadImage(path: string): screen.Image {.nimcall.} =
-  if path.len == 0 or nestRenderer == nil:
+  if path.len == 0:
+    return screen.Image(0)
+  if nestRenderer == nil:
     return screen.Image(0)
   if nestImageByPath.hasKey(path):
     return nestImageByPath[path]
@@ -705,6 +707,32 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event) =
     if event.text.text != nil:
       ui.textInput($event.text.text)
       ui.requestRedrawAfter(0)
+
+proc anyBlockedMouseButton(blockedButtons: array[256, bool]): bool =
+  for blocked in blockedButtons:
+    if blocked:
+      return true
+
+proc nestBlocksInputEvent(
+    ui: UI, event: sdl3.Event, blockedButtons: var array[256, bool]
+): bool =
+  let eventType = uint32(event.common.`type`)
+  if eventType == uint32(EVENT_MOUSE_BUTTON_DOWN):
+    let button = event.button.button.int
+    if button >= blockedButtons.low and button <= blockedButtons.high:
+      result = ui.pointerInputBlocked(event.button.x.int, event.button.y.int)
+      if result:
+        blockedButtons[button] = true
+  elif eventType == uint32(EVENT_MOUSE_BUTTON_UP):
+    let button = event.button.button.int
+    if button >= blockedButtons.low and button <= blockedButtons.high:
+      result = blockedButtons[button]
+      blockedButtons[button] = false
+  elif eventType == uint32(EVENT_MOUSE_MOTION):
+    result = anyBlockedMouseButton(blockedButtons)
+  elif eventType == uint32(EVENT_MOUSE_WHEEL):
+    result = ui.pointerInputBlocked(event.wheel.mouse_x.int,
+        event.wheel.mouse_y.int)
 
 proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
   for command in commands:
@@ -841,6 +869,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
       previousTime = getPerformanceCounter()
       sdlEvent: sdl3.Event
       firstFrame = true
+      blockedMouseButtons: array[256, bool]
     while running:
       let initialDelay = nextRedrawDelay(applicationRedrawDelayMs(),
           gui.redrawDelayMs())
@@ -858,17 +887,19 @@ template buildApplication*(appConfig: ApplicationConfig) =
       if hadEvent:
         if sdlEvent.`type` == EVENT_QUIT:
           running = false
-        inputs.handleEvent(sdlEvent)
+        handleNestEvent(gui, sdlEvent)
+        if not nestBlocksInputEvent(gui, sdlEvent, blockedMouseButtons):
+          inputs.handleEvent(sdlEvent)
         let event {.inject.} = sdlEvent
         generatePluginFunctionCalls(event)
-        handleNestEvent(gui, event)
         while pollEvent(sdlEvent):
           if sdlEvent.`type` == EVENT_QUIT:
             running = false
-          inputs.handleEvent(sdlEvent)
+          handleNestEvent(gui, sdlEvent)
+          if not nestBlocksInputEvent(gui, sdlEvent, blockedMouseButtons):
+            inputs.handleEvent(sdlEvent)
           let event {.inject.} = sdlEvent
           generatePluginFunctionCalls(event)
-          handleNestEvent(gui, event)
       if not running:
         gui.finishInputFrame()
         break
