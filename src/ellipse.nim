@@ -6,3 +6,6 @@ export update, draw
 
 import ellipse/rendering/artist3D
 export artist3d
+
+import plugnim
+export plugnim

@@ -1,11 +1,11 @@
-import std/[os, strutils]
+import std/[os, osproc, streams, strutils, tables]
 
 import sdl3
 import sdl3_ttf
 import chroma as chromaColors
 import plugnim
 import nest except Event, update, draw
-import nest/[coords, screen]
+import nest/[coords, input, screen]
 export plugnim
 export nest except Event, update, draw
 
@@ -35,6 +35,9 @@ var
   nestRenderer: Renderer
   nestWindow: Window
   nestFonts: seq[NestFontSlot]
+  nestPickedFiles: Table[WidgetID, string]
+  nestFilePickerErrors: Table[WidgetID, string]
+  nestFallbackFilePickers: Table[WidgetID, osproc.Process]
 
 type Application* = object
   window: Window
@@ -73,6 +76,232 @@ proc configureSdlVideoDriver() =
   if getEnv("SDL_VIDEO_DRIVER").len == 0 and getEnv("SDL_VIDEODRIVER").len == 0 and
       getEnv("WAYLAND_DISPLAY").len > 0:
     discard setHint("SDL_VIDEO_DRIVER", "wayland")
+
+proc closeNestFallbackFilePicker(id: WidgetID) =
+  if nestFallbackFilePickers.hasKey(id):
+    nestFallbackFilePickers[id].close()
+    nestFallbackFilePickers.del id
+
+proc startNestFallbackFilePicker(id: WidgetID, defaultLocation: string): bool =
+  if nestFallbackFilePickers.hasKey(id) and nestFallbackFilePickers[id].running:
+    return true
+  closeNestFallbackFilePicker(id)
+
+  try:
+    let zenity = findExe("zenity")
+    if zenity.len > 0:
+      echo "file picker fallback: zenity"
+      var args = @["--file-selection"]
+      if defaultLocation.len > 0:
+        args.add "--filename=" & defaultLocation
+      nestFallbackFilePickers[id] = startProcess(
+        zenity, args = args, options = {poStdErrToStdOut}
+      )
+      return true
+
+    let kdialog = findExe("kdialog")
+    if kdialog.len > 0:
+      echo "file picker fallback: kdialog"
+      var args = @["--getopenfilename"]
+      if defaultLocation.len > 0:
+        args.add defaultLocation
+      nestFallbackFilePickers[id] = startProcess(
+        kdialog, args = args, options = {poStdErrToStdOut}
+      )
+      return true
+
+    let yad = findExe("yad")
+    if yad.len > 0:
+      echo "file picker fallback: yad"
+      var args = @["--file-selection"]
+      if defaultLocation.len > 0:
+        args.add "--filename=" & defaultLocation
+      nestFallbackFilePickers[id] = startProcess(
+        yad, args = args, options = {poStdErrToStdOut}
+      )
+      return true
+
+    nestFilePickerErrors[id] =
+      "SDL file picker returned no selection and no fallback file picker was found"
+  except CatchableError as error:
+    nestFilePickerErrors[id] = error.msg
+  if nestFilePickerErrors.getOrDefault(id).len > 0:
+    echo "file picker error: ", nestFilePickerErrors[id]
+  false
+
+proc pollNestFallbackFilePickers() =
+  var finished: seq[WidgetID]
+  for id, process in nestFallbackFilePickers.mpairs:
+    if process.running:
+      continue
+    let output = process.outputStream.readAll.strip
+    let exitCode = process.peekExitCode()
+    process.close()
+    finished.add id
+    if exitCode == 0 and output.len > 0:
+      nestPickedFiles[id] = output.splitLines()[0]
+      nestFilePickerErrors.del id
+      echo "file picked: ", nestPickedFiles[id]
+    elif exitCode != 0 and output.len > 0:
+      nestFilePickerErrors[id] = output
+      echo "file picker error: ", nestFilePickerErrors[id]
+  for id in finished:
+    nestFallbackFilePickers.del id
+
+proc nestOpenFile(id: WidgetID, defaultLocation: cstring): bool {.cdecl.} =
+  try:
+    nestFilePickerErrors.del id
+    var completed = false
+    var selected = false
+    echo "file picker requested"
+    dialogs.showOpenFileDialog(
+      proc(result: dialogs.FileDialogResult) =
+        completed = true
+        selected = not result.canceled and result.paths.len > 0
+        if selected:
+          nestPickedFiles[id] = result.paths[0]
+      ,
+      defaultLocation = $defaultLocation,
+      allowMany = false,
+      window = nestWindow,
+    )
+    let dialogError = dialogs.dialogError()
+    if dialogError.len > 0:
+      nestFilePickerErrors[id] = dialogError
+    if selected:
+      return true
+    if completed and nestFilePickerErrors.getOrDefault(id).len == 0:
+      return startNestFallbackFilePicker(id, $defaultLocation)
+    result = nestFilePickerErrors.getOrDefault(id).len == 0
+    if not result:
+      echo "file picker error: ", nestFilePickerErrors[id]
+  except CatchableError as error:
+    nestFilePickerErrors[id] = error.msg
+    echo "file picker error: ", nestFilePickerErrors[id]
+    result = false
+
+proc nestFileValue(id: WidgetID): cstring {.cdecl.} =
+  if nestPickedFiles.hasKey(id):
+    nestPickedFiles[id].cstring
+  else:
+    cstring""
+
+proc nestFileError(id: WidgetID): cstring {.cdecl.} =
+  let dialogError = dialogs.dialogError()
+  if dialogError.len > 0:
+    nestFilePickerErrors[id] = dialogError
+  if nestFilePickerErrors.hasKey(id):
+    nestFilePickerErrors[id].cstring
+  else:
+    cstring""
+
+proc nestClearFile(id: WidgetID) {.cdecl.} =
+  nestPickedFiles.del id
+  nestFilePickerErrors.del id
+
+proc translateNestScancode(scancode: Scancode): input.KeyCode =
+  case scancode
+  of SCANCODE_A: KeyA
+  of SCANCODE_B: KeyB
+  of SCANCODE_C: KeyC
+  of SCANCODE_D: KeyD
+  of SCANCODE_E: KeyE
+  of SCANCODE_F: KeyF
+  of SCANCODE_G: KeyG
+  of SCANCODE_H: KeyH
+  of SCANCODE_I: KeyI
+  of SCANCODE_J: KeyJ
+  of SCANCODE_K: KeyK
+  of SCANCODE_L: KeyL
+  of SCANCODE_M: KeyM
+  of SCANCODE_N: KeyN
+  of SCANCODE_O: KeyO
+  of SCANCODE_P: KeyP
+  of SCANCODE_Q: KeyQ
+  of SCANCODE_R: KeyR
+  of SCANCODE_S: KeyS
+  of SCANCODE_T: KeyT
+  of SCANCODE_U: KeyU
+  of SCANCODE_V: KeyV
+  of SCANCODE_W: KeyW
+  of SCANCODE_X: KeyX
+  of SCANCODE_Y: KeyY
+  of SCANCODE_Z: KeyZ
+  of SCANCODE_1: Key1
+  of SCANCODE_2: Key2
+  of SCANCODE_3: Key3
+  of SCANCODE_4: Key4
+  of SCANCODE_5: Key5
+  of SCANCODE_6: Key6
+  of SCANCODE_7: Key7
+  of SCANCODE_8: Key8
+  of SCANCODE_9: Key9
+  of SCANCODE_0: Key0
+  of SCANCODE_F1: KeyF1
+  of SCANCODE_F2: KeyF2
+  of SCANCODE_F3: KeyF3
+  of SCANCODE_F4: KeyF4
+  of SCANCODE_F5: KeyF5
+  of SCANCODE_F6: KeyF6
+  of SCANCODE_F7: KeyF7
+  of SCANCODE_F8: KeyF8
+  of SCANCODE_F9: KeyF9
+  of SCANCODE_F10: KeyF10
+  of SCANCODE_F11: KeyF11
+  of SCANCODE_F12: KeyF12
+  of SCANCODE_RETURN: KeyEnter
+  of SCANCODE_SPACE: KeySpace
+  of SCANCODE_ESCAPE: KeyEsc
+  of SCANCODE_TAB: KeyTab
+  of SCANCODE_BACKSPACE: KeyBackspace
+  of SCANCODE_DELETE: KeyDelete
+  of SCANCODE_INSERT: KeyInsert
+  of SCANCODE_LEFT: KeyLeft
+  of SCANCODE_RIGHT: KeyRight
+  of SCANCODE_UP: KeyUp
+  of SCANCODE_DOWN: KeyDown
+  of SCANCODE_PAGEUP: KeyPageUp
+  of SCANCODE_PAGEDOWN: KeyPageDown
+  of SCANCODE_HOME: KeyHome
+  of SCANCODE_END: KeyEnd
+  of SCANCODE_CAPSLOCK: KeyCapslock
+  of SCANCODE_COMMA: KeyComma
+  of SCANCODE_PERIOD: KeyPeriod
+  of SCANCODE_SLASH: KeySlash
+  of SCANCODE_MINUS: KeyMinus
+  of SCANCODE_EQUALS: KeyEqual
+  of SCANCODE_KP_MINUS: KeyMinus
+  of SCANCODE_KP_PLUS: KeyPlus
+  of SCANCODE_KP_EQUALS: KeyEqual
+  else: KeyNone
+
+proc translateNestKeycode(keycode: int32): input.KeyCode =
+  case keycode
+  of SDLK_MINUS.int32, SDLK_KP_MINUS.int32: KeyMinus
+  of SDLK_EQUALS.int32, SDLK_KP_EQUALS.int32: KeyEqual
+  of SDLK_PLUS.int32, SDLK_KP_PLUS.int32: KeyPlus
+  else: KeyNone
+
+proc translateNestMods(keymod: Keymod): set[input.Modifier] =
+  let flags = keymod.uint32
+  if (flags and KMOD_SHIFT) != 0:
+    result.incl ShiftPressed
+  if (flags and KMOD_CTRL) != 0:
+    result.incl CtrlPressed
+  if (flags and KMOD_ALT) != 0:
+    result.incl AltPressed
+  if (flags and KMOD_GUI) != 0:
+    result.incl GuiPressed
+
+proc nestIO(): IO =
+  IO(
+    files: FileIO(
+      openFile: nestOpenFile,
+      fileValue: nestFileValue,
+      fileError: nestFileError,
+      clearFile: nestClearFile,
+    )
+  )
 
 template update(dt: float64) =
   generatePluginFunctionCalls(update)
@@ -308,12 +537,60 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event) =
     ui.mouseMove(event.wheel.mouse_x.int, event.wheel.mouse_y.int)
     ui.mouseWheel(event.wheel.x.float64, event.wheel.y.float64)
     ui.requestRedrawAfter(0)
+  elif eventType == uint32(EVENT_KEY_DOWN):
+    var key = translateNestScancode(event.key.scancode)
+    if key == KeyNone:
+      key = translateNestKeycode(event.key.key.int32)
+    if key != KeyNone:
+      ui.keyDown(key, translateNestMods(event.key.`mod`))
+      ui.requestRedrawAfter(0)
+  elif eventType == uint32(EVENT_TEXT_INPUT):
+    if event.text.text != nil:
+      ui.textInput($event.text.text)
+      ui.requestRedrawAfter(0)
+
+proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
+  for command in commands:
+    case command.kind
+    of SaveState:
+      discard
+    of RestoreState:
+      nestClearClipRect()
+    of SetClipRect:
+      nestSetClipRect(command.rect)
+    of FillRect:
+      nestFillRect(command.rect, command.color)
+    of LineRect:
+      nestLineRect(command.rect, command.color)
+    of DrawLine:
+      nestDrawLine(command.x1, command.y1, command.x2, command.y2, command.lineColor)
+    of DrawPoint:
+      nestDrawPoint(command.x, command.y, command.pointColor)
+    of DrawText:
+      discard nestDrawText(
+        command.font,
+        command.textX,
+        command.textY,
+        command.text,
+        command.fg,
+        command.bg,
+      )
+    of DrawImage:
+      nestDrawImage(command.image, command.src, command.dst)
 
 template renderNest*(ui: var UI, body: untyped) =
   ui.beginInputFrame()
   ui.setDrawTicks(sdl3.getTicks().int)
   ui.markAllDirty()
+  var drawCommands {.inject.}: seq[screen.DrawCommand]
+  ui.setDrawCommandRelays(addr drawCommands, nestMeasureText)
+  pollNestFallbackFilePickers()
+  var io {.inject.} = nestIO()
+  ui.setIO(io)
   body
+  ui.setDrawCommandRelays(nil, nil)
+  ui.setIO(IO())
+  replayDrawCommands(drawCommands)
   ui.finishInputFrame()
 
 template sdlApplication(events, step) =
@@ -338,6 +615,7 @@ template sdlApplication(events, step) =
 
 template buildApplication*(appConfig: ApplicationConfig) =
   generatePluginContext()
+  loadDynamicPlugins()
   proc start() =
     configureSdlVideoDriver()
     if not sdl3.init(INIT_VIDEO or INIT_AUDIO or INIT_GAMEPAD):
@@ -358,6 +636,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
     if app.window.isNil:
       raiseError("Failed to create window")
     attempt showWindow(app.window), "Failed to show window"
+    discard startTextInput(app.window)
     app.renderer = sdl3.createRenderer(app.window, cstring"gpu")
     if app.renderer.isNil:
       raiseError("Failed to create renderer")
