@@ -13,5 +13,8 @@ export cameras
 import ellipse/inputs
 export inputs
 
+import ellipse/resources
+export resources
+
 import plugnim
 export plugnim

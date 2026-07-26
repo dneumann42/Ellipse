@@ -4,6 +4,7 @@ import sdl3, vmath
 
 import cameras
 import ../errors
+import ../resources
 
 const
   DefaultCameraID* = "default"
@@ -15,15 +16,31 @@ const
   DefaultFarPlane = 100'f32
 
 type Vertex* = object
-  uv*: IVec2
   position*, normal*: Vec3
+  uv*: Vec2
 
 type
   MeshID* = string
 
+  MeshRenderMode* = enum
+    SolidMesh, WireframeMesh
+
+  RenderOptions* = object
+    mode*: MeshRenderMode
+    depthWrite*: bool
+    baseColor*: Vec3
+    materialID*: string
+
+  Material* = object
+    id*: string
+    texture*: TextureResourceHandle
+    baseColor*: Vec3
+    useTexture*: bool
+
   Model* = object
     meshID*: MeshID
     transform*: Mat4
+    renderOptions*: RenderOptions
 
   Mesh = object
     vertexBuffer, indexBuffer: GPUBuffer
@@ -32,22 +49,34 @@ type
     indices: seq[uint32]
     verticesDirty, indicesDirty: bool
 
+  GpuMaterial = object
+    material: Material
+    texture: GPUTexture
+    textureWidth, textureHeight: uint32
+    textureDirty: bool
+
   TransformUniforms = object
     modelViewProjection: Mat4
     model: Mat4
 
   LightingUniforms = object
     cameraPosition: Vec3
-    padding: float32
+    cameraPadding: float32
+    baseColor: Vec3
+    useTexture: float32
 
 type
   Artist3DState = object
     renderer: Renderer
     device: GPUDevice
-    pipeline: GPUGraphicsPipeline
+    solidPipeline, wireframePipeline: GPUGraphicsPipeline
     vertexShader: GPUShader
     fragmentShader: GPUShader
     meshes: Table[MeshID, Mesh]
+    materials: Table[string, GpuMaterial]
+    sampler: pointer
+    samplerReady: bool
+    whiteTexture: GPUTexture
     defaultModel: Model
     colorTexture, depthTexture: GPUTexture
     renderTexture: Texture
@@ -71,6 +100,19 @@ type
     buffer: GPUBuffer
     offset: uint32
     size: uint32
+
+  GpuTextureTransferInfo {.bycopy.} = object
+    transfer_buffer: GPUTransferBuffer
+    offset: uint32
+    pixels_per_row: uint32
+    rows_per_layer: uint32
+
+  GpuTextureRegion {.bycopy.} = object
+    texture: GPUTexture
+    mip_level: uint32
+    layer: uint32
+    x, y, z: uint32
+    w, h, d: uint32
 
   GpuGraphicsPipelineCreateInfo {.bycopy.} = object
     vertex_shader: GPUShader
@@ -114,6 +156,10 @@ type
     buffer: GPUBuffer
     offset: uint32
 
+  GpuTextureSamplerBinding {.bycopy.} = object
+    texture: GPUTexture
+    sampler: pointer
+
 proc createGpuGraphicsPipeline(
   device: GPUDevice, createInfo: ptr GpuGraphicsPipelineCreateInfo
 ): GPUGraphicsPipeline {.
@@ -126,6 +172,13 @@ proc uploadToGpuBuffer(
   destination: ptr GpuBufferRegion,
   cycle: bool,
 ) {.cdecl, dynlib: LibName, importc: "SDL_UploadToGPUBuffer".}
+
+proc uploadToGpuTexture(
+  copyPass: GPUCopyPass,
+  source: ptr GpuTextureTransferInfo,
+  destination: ptr GpuTextureRegion,
+  cycle: bool,
+) {.cdecl, dynlib: LibName, importc: "SDL_UploadToGPUTexture".}
 
 proc beginGpuRenderPass(
   commandBuffer: GPUCommandBuffer,
@@ -147,16 +200,33 @@ proc bindGpuIndexBuffer(
   indexElementSize: GPUIndexElementSize,
 ) {.cdecl, dynlib: LibName, importc: "SDL_BindGPUIndexBuffer".}
 
+proc bindGpuFragmentSamplers(
+  renderPass: GPURenderPass,
+  firstSlot: uint32,
+  textureSamplerBindings: ptr GpuTextureSamplerBinding,
+  numBindings: uint32,
+) {.cdecl, dynlib: LibName, importc: "SDL_BindGPUFragmentSamplers".}
+
+proc createGpuSampler(
+  device: GPUDevice, createInfo: ptr GPUSamplerCreateInfo
+): pointer {.cdecl, dynlib: LibName, importc: "SDL_CreateGPUSampler".}
+
+proc releaseGpuSampler(device: GPUDevice, sampler: pointer) {.
+  cdecl, dynlib: LibName, importc: "SDL_ReleaseGPUSampler"
+.}
+
 proc `=copy`*(artist: var Artist3D, source: Artist3D) {.error.}
 
 proc activeCamera*(artist: Artist3DState): cameras.Camera
 proc uploadMesh(artist: var Artist3DState, meshID: MeshID)
+proc uploadMaterialTexture(artist: var Artist3DState, materialID: string)
 
 proc raiseGpuError(context: string) {.noreturn.} =
   raise SDLException.newException(context & ": " & $sdl3.getError())
 
 proc shaderPath(name: string): string =
-  currentSourcePath().parentDir.parentDir.parentDir.parentDir / "build" / "shaders" /
+  currentSourcePath().parentDir.parentDir.parentDir.parentDir / "build" /
+      "shaders" /
     name
 
 proc loadShaderCode(name: string): string =
@@ -167,7 +237,8 @@ proc loadShaderCode(name: string): string =
   if result.len == 0:
     raiseGpuError(&"Shader {path} is empty")
 
-proc createShader(device: GPUDevice, name: string, stage: GPUShaderStage): GPUShader =
+proc createShader(device: GPUDevice, name: string,
+    stage: GPUShaderStage): GPUShader =
   let code = loadShaderCode(name)
   var info = GPUShaderCreateInfo(
     code_size: code.len.csize_t,
@@ -175,6 +246,7 @@ proc createShader(device: GPUDevice, name: string, stage: GPUShaderStage): GPUSh
     entrypoint: cstring"main",
     format: GPU_SHADERFORMAT_SPIRV.GPUShaderFormat,
     stage: stage,
+    num_samplers: if stage == GPU_SHADERSTAGE_FRAGMENT: 1'u32 else: 0'u32,
     num_uniform_buffers: 1,
   )
   result = createGPUShader(device, addr info)
@@ -197,8 +269,23 @@ proc identityMat4(): Mat4 =
   result[2, 2] = 1
   result[3, 3] = 1
 
-proc init*(T: typedesc[Model], meshID: MeshID, transform = identityMat4()): T =
-  T(meshID: meshID, transform: transform)
+proc init*(
+    T: typedesc[RenderOptions],
+    mode = SolidMesh,
+    depthWrite = true,
+    baseColor = vec3(0.9'f32, 0.52'f32, 0.22'f32),
+    materialID = "",
+): T =
+  T(mode: mode, depthWrite: depthWrite, baseColor: baseColor,
+      materialID: materialID)
+
+proc init*(
+    T: typedesc[Model],
+    meshID: MeshID,
+    transform = identityMat4(),
+    renderOptions = RenderOptions.init(),
+): T =
+  T(meshID: meshID, transform: transform, renderOptions: renderOptions)
 
 proc viewProjection(artist: Artist3DState): Mat4 =
   let aspect =
@@ -210,12 +297,24 @@ proc viewProjection(artist: Artist3DState): Mat4 =
     forwardPerspective(DefaultFovY, aspect, DefaultNearPlane, DefaultFarPlane)
   projection * artist.activeCamera.viewMatrix
 
-proc transformUniforms(artist: Artist3DState, modelTransform: Mat4): TransformUniforms =
+proc transformUniforms(artist: Artist3DState,
+    modelTransform: Mat4): TransformUniforms =
   result.model = modelTransform
   result.modelViewProjection = artist.viewProjection * modelTransform
 
-proc lightingUniforms(artist: Artist3DState): LightingUniforms =
+proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
   result.cameraPosition = artist.activeCamera.position
+  result.baseColor = model.renderOptions.baseColor
+  if model.renderOptions.materialID.len > 0 and
+      artist.materials.hasKey(model.renderOptions.materialID):
+    let material = artist.materials[model.renderOptions.materialID].material
+    result.baseColor = material.baseColor
+    result.useTexture =
+      if material.useTexture and material.texture != nil and
+          material.texture.pixels.len > 0:
+        1'f32
+      else:
+        0'f32
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -244,15 +343,39 @@ proc releaseMeshBuffers(artist: var Artist3DState) =
   for mesh in artist.meshes.mvalues:
     artist.releaseMeshBuffers(mesh)
 
+proc releaseMaterials(artist: var Artist3DState) =
+  for material in artist.materials.mvalues:
+    if material.texture != nil:
+      releaseGPUTexture(artist.device, material.texture)
+      material.texture = nil
+  artist.materials.clear()
+  if artist.whiteTexture != nil:
+    releaseGPUTexture(artist.device, artist.whiteTexture)
+    artist.whiteTexture = nil
+  if artist.samplerReady:
+    releaseGpuSampler(artist.device, artist.sampler)
+    artist.sampler = nil
+    artist.samplerReady = false
+
+proc releasePipelines(artist: var Artist3DState) =
+  if not artist.solidPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.solidPipeline)
+    artist.solidPipeline = nil
+  if not artist.wireframePipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.wireframePipeline)
+    artist.wireframePipeline = nil
+
 proc createMeshBuffer(
-    artist: var Artist3DState, usage: GPUBufferUsageFlags, size: uint32, context: string
+    artist: var Artist3DState, usage: GPUBufferUsageFlags, size: uint32,
+        context: string
 ): GPUBuffer =
   var info = GPUBufferCreateInfo(usage: usage, size: size)
   result = createGPUBuffer(artist.device, addr info)
   if result.isNil:
     raiseGpuError(context)
 
-proc ensureVertexBuffer(artist: var Artist3DState, mesh: var Mesh, bufferSize: uint32) =
+proc ensureVertexBuffer(artist: var Artist3DState, mesh: var Mesh,
+    bufferSize: uint32) =
   if bufferSize == 0:
     return
   if mesh.vertexBuffer.isNil or mesh.vertexBufferSize < bufferSize:
@@ -265,7 +388,8 @@ proc ensureVertexBuffer(artist: var Artist3DState, mesh: var Mesh, bufferSize: u
     mesh.vertexBufferSize = bufferSize
     mesh.verticesDirty = true
 
-proc ensureIndexBuffer(artist: var Artist3DState, mesh: var Mesh, bufferSize: uint32) =
+proc ensureIndexBuffer(artist: var Artist3DState, mesh: var Mesh,
+    bufferSize: uint32) =
   if bufferSize == 0:
     return
   if mesh.indexBuffer.isNil or mesh.indexBufferSize < bufferSize:
@@ -290,7 +414,8 @@ proc uploadBytesToGpuBuffer(
     return
 
   var transferInfo =
-    GPUTransferBufferCreateInfo(usage: GPU_TRANSFERBUFFERUSAGE_UPLOAD, size: bufferSize)
+    GPUTransferBufferCreateInfo(usage: GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        size: bufferSize)
   let transferBuffer = createGPUTransferBuffer(artist.device, addr transferInfo)
   if transferBuffer.isNil:
     raiseGpuError("Failed to create GPU transfer buffer for " & context)
@@ -312,6 +437,162 @@ proc uploadBytesToGpuBuffer(
   uploadToGpuBuffer(copyPass, addr source, addr destination, true)
   endGPUCopyPass(copyPass)
   transferBuffer
+
+proc createSampledTexture(
+    artist: var Artist3DState, width, height: uint32, context: string
+): GPUTexture =
+  var textureInfo = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_2D,
+    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+    usage: GPU_TEXTUREUSAGE_SAMPLER.GPUTextureUsageFlags,
+    width: width,
+    height: height,
+    layer_count_or_depth: 1,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  result = createGPUTexture(artist.device, addr textureInfo)
+  if result.isNil:
+    raiseGpuError(context)
+
+proc uploadBytesToGpuTexture(
+    artist: var Artist3DState,
+    commandBuffer: GPUCommandBuffer,
+    texture: GPUTexture,
+    sourceBytes: pointer,
+    width, height: uint32,
+    context: string,
+): GPUTransferBuffer =
+  let bufferSize = width * height * 4
+  if bufferSize == 0:
+    return
+
+  var transferInfo =
+    GPUTransferBufferCreateInfo(usage: GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        size: bufferSize)
+  let transferBuffer = createGPUTransferBuffer(artist.device, addr transferInfo)
+  if transferBuffer.isNil:
+    raiseGpuError("Failed to create GPU transfer buffer for " & context)
+
+  let mapped = mapGPUTransferBuffer(artist.device, transferBuffer, false)
+  if mapped.isNil:
+    releaseGPUTransferBuffer(artist.device, transferBuffer)
+    raiseGpuError("Failed to map GPU transfer buffer for " & context)
+  copyMem(mapped, sourceBytes, bufferSize)
+  unmapGPUTransferBuffer(artist.device, transferBuffer)
+
+  let copyPass = beginGPUCopyPass(commandBuffer)
+  if copyPass.isNil:
+    releaseGPUTransferBuffer(artist.device, transferBuffer)
+    raiseGpuError("Failed to begin GPU copy pass for " & context)
+
+  var source = GpuTextureTransferInfo(
+    transfer_buffer: transferBuffer,
+    offset: 0,
+    pixels_per_row: width,
+    rows_per_layer: height,
+  )
+  var destination = GpuTextureRegion(
+    texture: texture,
+    mip_level: 0,
+    layer: 0,
+    x: 0,
+    y: 0,
+    z: 0,
+    w: width,
+    h: height,
+    d: 1,
+  )
+  uploadToGpuTexture(copyPass, addr source, addr destination, true)
+  endGPUCopyPass(copyPass)
+  transferBuffer
+
+proc uploadTexturePixels(
+    artist: var Artist3DState,
+    texture: GPUTexture,
+    pixels: var seq[uint8],
+    width, height: uint32,
+    context: string,
+) =
+  if texture == nil or pixels.len == 0:
+    return
+  let commandBuffer = acquireGPUCommandBuffer(artist.device)
+  if commandBuffer.isNil:
+    raiseGpuError("Failed to acquire GPU command buffer")
+  let transferBuffer = artist.uploadBytesToGpuTexture(
+    commandBuffer,
+    texture,
+    unsafeAddr pixels[0],
+    width,
+    height,
+    context,
+  )
+  defer:
+    if transferBuffer != nil:
+      releaseGPUTransferBuffer(artist.device, transferBuffer)
+  if not submitGPUCommandBuffer(commandBuffer):
+    raiseGpuError("Failed to submit GPU texture upload")
+
+proc ensureSampler(artist: var Artist3DState) =
+  if artist.device.isNil or artist.samplerReady:
+    return
+  var samplerInfo = GPUSamplerCreateInfo(
+    min_filter: GPU_FILTER_LINEAR,
+    mag_filter: GPU_FILTER_LINEAR,
+    mipmap_mode: GPU_SAMPLERMIPMAPMODE_LINEAR,
+    address_mode_u: GPU_SAMPLERADDRESSMODE_REPEAT,
+    address_mode_v: GPU_SAMPLERADDRESSMODE_REPEAT,
+    address_mode_w: GPU_SAMPLERADDRESSMODE_REPEAT,
+  )
+  artist.sampler = createGpuSampler(artist.device, addr samplerInfo)
+  if artist.sampler.isNil:
+    raiseGpuError("Failed to create GPU sampler")
+  artist.samplerReady = true
+
+proc ensureWhiteTexture(artist: var Artist3DState) =
+  if artist.device.isNil or artist.whiteTexture != nil:
+    return
+  artist.whiteTexture = artist.createSampledTexture(1, 1,
+      "Failed to create default texture")
+  var pixels = @[255'u8, 255, 255, 255]
+  artist.uploadTexturePixels(artist.whiteTexture, pixels, 1, 1, "default texture")
+
+proc uploadMaterialTexture(artist: var Artist3DState, materialID: string) =
+  if artist.device.isNil or not artist.materials.hasKey(materialID):
+    return
+  var gpuMaterial = artist.materials[materialID]
+  defer:
+    artist.materials[materialID] = gpuMaterial
+  if not gpuMaterial.textureDirty:
+    return
+  if gpuMaterial.texture != nil:
+    releaseGPUTexture(artist.device, gpuMaterial.texture)
+    gpuMaterial.texture = nil
+  gpuMaterial.textureWidth = 0
+  gpuMaterial.textureHeight = 0
+
+  let texture = gpuMaterial.material.texture
+  if texture == nil or texture.pixels.len == 0 or texture.width <= 0 or
+      texture.height <= 0:
+    gpuMaterial.textureDirty = false
+    return
+
+  gpuMaterial.texture = artist.createSampledTexture(
+    texture.width.uint32,
+    texture.height.uint32,
+    "Failed to create material texture",
+  )
+  var pixels = texture.pixels
+  artist.uploadTexturePixels(
+    gpuMaterial.texture,
+    pixels,
+    texture.width.uint32,
+    texture.height.uint32,
+    "material texture",
+  )
+  gpuMaterial.textureWidth = texture.width.uint32
+  gpuMaterial.textureHeight = texture.height.uint32
+  gpuMaterial.textureDirty = false
 
 proc uploadMesh(artist: var Artist3DState, meshID: MeshID) =
   if artist.device.isNil:
@@ -367,15 +648,13 @@ proc uploadMesh(artist: var Artist3DState, meshID: MeshID) =
   mesh.verticesDirty = false
   mesh.indicesDirty = false
 
-proc createTrianglePipeline(artist: var Artist3DState) =
-  artist.vertexShader =
-    createShader(artist.device, "triangle.vert.spv", GPU_SHADERSTAGE_VERTEX)
-  artist.fragmentShader =
-    createShader(artist.device, "triangle.frag.spv", GPU_SHADERSTAGE_FRAGMENT)
-
+proc createTrianglePipeline(
+    artist: var Artist3DState, mode: MeshRenderMode, depthWrite: bool
+): GPUGraphicsPipeline =
   var vertexBuffers = [
     GPUVertexBufferDescription(
-      slot: 0, pitch: sizeof(Vertex).uint32, input_rate: GPU_VERTEXINPUTRATE_VERTEX
+      slot: 0, pitch: sizeof(Vertex).uint32,
+          input_rate: GPU_VERTEXINPUTRATE_VERTEX
     )
   ]
   var vertexAttributes = [
@@ -391,6 +670,12 @@ proc createTrianglePipeline(artist: var Artist3DState) =
       format: GPU_VERTEXELEMENTFORMAT_FLOAT3,
       offset: offsetof(Vertex, normal).uint32,
     ),
+    GPUVertexAttribute(
+      location: 2,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT2,
+      offset: offsetof(Vertex, uv).uint32,
+    ),
   ]
   var colorTarget = GPUColorTargetDescription(
     format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
@@ -398,13 +683,13 @@ proc createTrianglePipeline(artist: var Artist3DState) =
       color_write_mask: (
         GPU_COLORCOMPONENT_R or GPU_COLORCOMPONENT_G or GPU_COLORCOMPONENT_B or
         GPU_COLORCOMPONENT_A
-      ).GPUColorComponentFlags,
-      enable_color_write_mask: true,
-    ),
+    ).GPUColorComponentFlags,
+    enable_color_write_mask: true,
+  ),
   )
   var targetInfo = GPUGraphicsPipelineTargetInfo(
     color_target_descriptions:
-      cast[ptr UncheckedArray[GPUColorTargetDescription]](addr colorTarget),
+    cast[ptr UncheckedArray[GPUColorTargetDescription]](addr colorTarget),
     num_color_targets: 1,
     depth_stencil_format: GPU_TEXTUREFORMAT_D16_UNORM,
     has_depth_stencil_target: true,
@@ -414,29 +699,38 @@ proc createTrianglePipeline(artist: var Artist3DState) =
     fragment_shader: artist.fragmentShader,
     vertex_input_state: GPUVertexInputState(
       vertex_buffer_descriptions:
-        cast[ptr UncheckedArray[GPUVertexBufferDescription]](addr vertexBuffers[0]),
+    cast[ptr UncheckedArray[GPUVertexBufferDescription]](addr vertexBuffers[0]),
       num_vertex_buffers: vertexBuffers.len.uint32,
       vertex_attributes:
-        cast[ptr UncheckedArray[GPUVertexAttribute]](addr vertexAttributes[0]),
+    cast[ptr UncheckedArray[GPUVertexAttribute]](addr vertexAttributes[0]),
       num_vertex_attributes: vertexAttributes.len.uint32,
     ),
     primitive_type: GPU_PRIMITIVETYPE_TRIANGLELIST,
     rasterizer_state: GPURasterizerState(
-      fill_mode: GPU_FILLMODE_FILL,
-      cull_mode: GPU_CULLMODE_BACK,
+      fill_mode: if mode == WireframeMesh: GPU_FILLMODE_LINE else: GPU_FILLMODE_FILL,
+      cull_mode: if mode == WireframeMesh: GPU_CULLMODE_NONE else: GPU_CULLMODE_BACK,
       front_face: GPU_FRONTFACE_CLOCKWISE,
     ),
     multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
     depth_stencil_state: GPUDepthStencilState(
       compare_op: GPU_COMPAREOP_LESS_OR_EQUAL,
       enable_depth_test: true,
-      enable_depth_write: true,
+      enable_depth_write: depthWrite,
     ),
     target_info: targetInfo,
   )
-  artist.pipeline = createGpuGraphicsPipeline(artist.device, addr pipelineInfo)
-  if artist.pipeline.isNil:
+  result = createGpuGraphicsPipeline(artist.device, addr pipelineInfo)
+  if result.isNil:
     raiseGpuError("Failed to create GPU graphics pipeline")
+
+proc createTrianglePipelines(artist: var Artist3DState) =
+  artist.releasePipelines()
+  artist.vertexShader =
+    createShader(artist.device, "triangle.vert.spv", GPU_SHADERSTAGE_VERTEX)
+  artist.fragmentShader =
+    createShader(artist.device, "triangle.frag.spv", GPU_SHADERSTAGE_FRAGMENT)
+  artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true)
+  artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, false)
 
 proc installArtist3DRenderer*(renderer: Renderer) =
   defaultRenderer = renderer
@@ -448,9 +742,13 @@ proc initWithRenderer(artist: var Artist3DState, renderer: Renderer) =
   ))
   if artist.device.isNil:
     raiseGpuError("SDL renderer is not the GPU renderer")
-  artist.createTrianglePipeline()
+  artist.ensureSampler()
+  artist.ensureWhiteTexture()
+  artist.createTrianglePipelines()
   for meshID in artist.meshes.keys:
     artist.uploadMesh(meshID)
+  for materialID in artist.materials.keys:
+    artist.uploadMaterialTexture(materialID)
 
 proc activeCamera*(artist: Artist3DState): cameras.Camera =
   if not artist.allCameras.hasKey(artist.activeCameraID):
@@ -506,6 +804,23 @@ proc setMesh*(
     artist: Artist3D, vertices: openArray[Vertex], indices: openArray[uint32]
 ) =
   artist.setMesh(DefaultMeshID, vertices, indices)
+
+proc setMaterial*(artist: Artist3D, material: Material) =
+  if artist.state.isNil or material.id.len == 0:
+    return
+  var gpuMaterial = artist.state.materials.getOrDefault(material.id)
+  let changed =
+    gpuMaterial.material.texture != material.texture or
+    gpuMaterial.material.useTexture != material.useTexture
+  gpuMaterial.material = material
+  gpuMaterial.textureDirty = gpuMaterial.textureDirty or changed or
+      (material.useTexture and gpuMaterial.texture == nil)
+  artist.state.materials[material.id] = gpuMaterial
+
+proc material*(artist: Artist3D, id: string): Material =
+  if artist.state.isNil or not artist.state.materials.hasKey(id):
+    return Material(id: id, baseColor: vec3(1, 1, 1))
+  artist.state.materials[id].material
 
 proc vertices*(artist: Artist3D): var seq[Vertex] =
   doAssert not artist.state.isNil
@@ -586,7 +901,7 @@ proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
     `type`: GPU_TEXTURETYPE_2D,
     format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
     usage:
-      (GPU_TEXTUREUSAGE_COLOR_TARGET or GPU_TEXTUREUSAGE_SAMPLER).GPUTextureUsageFlags,
+    (GPU_TEXTUREUSAGE_COLOR_TARGET or GPU_TEXTUREUSAGE_SAMPLER).GPUTextureUsageFlags,
     width: width,
     height: height,
     layer_count_or_depth: 1,
@@ -655,6 +970,8 @@ proc `=destroy`*(artist: var Artist3D) =
   if not artist.state.isNil and not artist.state.device.isNil:
     artist.state[].releaseRenderTarget()
     artist.state[].releaseMeshBuffers()
+    artist.state[].releaseMaterials()
+    artist.state[].releasePipelines()
 
 proc drawModel(
     state: var Artist3DState,
@@ -669,28 +986,55 @@ proc drawModel(
   if mesh.vertexBuffer.isNil or mesh.indexBuffer.isNil or mesh.indices.len == 0:
     return
 
+  let pipeline =
+    case model.renderOptions.mode
+    of SolidMesh: state.solidPipeline
+    of WireframeMesh: state.wireframePipeline
+  if pipeline.isNil:
+    return
+
   var binding = GpuBufferBinding(buffer: mesh.vertexBuffer, offset: 0)
   var indexBinding = GpuBufferBinding(buffer: mesh.indexBuffer, offset: 0)
   var uniforms = state.transformUniforms(extraTransform * model.transform)
-  var lighting = state.lightingUniforms()
+  var lighting = state.lightingUniforms(model)
+  var texture = state.whiteTexture
+  if model.renderOptions.materialID.len > 0 and
+      state.materials.hasKey(model.renderOptions.materialID):
+    let material = state.materials[model.renderOptions.materialID]
+    if material.texture != nil:
+      texture = material.texture
+  var samplerBinding = GpuTextureSamplerBinding(
+    texture: texture,
+    sampler: state.sampler,
+  )
+  if texture.isNil or state.sampler.isNil:
+    raiseGpuError("Missing GPU texture sampler binding")
   pushGPUVertexUniformData(
-    commandBuffer, CameraUniformSlot, addr uniforms, sizeof(TransformUniforms).uint32
+    commandBuffer, CameraUniformSlot, addr uniforms, sizeof(
+        TransformUniforms).uint32
   )
   pushGPUFragmentUniformData(
     commandBuffer, 0, addr lighting, sizeof(LightingUniforms).uint32
   )
+  bindGPUGraphicsPipeline(pass, pipeline)
+  if state.samplerReady and texture != nil:
+    bindGpuFragmentSamplers(pass, 0, addr samplerBinding, 1)
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
   drawGPUIndexedPrimitives(pass, mesh.indices.len.uint32, 1, 0, 0, 0)
 
-proc render*(artist: Artist3D, models: openArray[Model], transform = identityMat4()) =
+proc render*(artist: Artist3D, models: openArray[Model],
+    transform = identityMat4()) =
   if artist.state.isNil:
     return
   let state = artist.state
   state[].ensureReady()
   for model in models:
     state[].uploadMesh(model.meshID)
-  if state.device.isNil or state.pipeline.isNil or state.colorTexture.isNil:
+    if model.renderOptions.materialID.len > 0:
+      state[].uploadMaterialTexture(model.renderOptions.materialID)
+  if state.device.isNil or state.solidPipeline.isNil or
+      state.wireframePipeline.isNil or state.colorTexture.isNil:
     return
 
   discard flushRenderer(state.renderer)
@@ -718,7 +1062,6 @@ proc render*(artist: Artist3D, models: openArray[Model], transform = identityMat
     discard cancelGPUCommandBuffer(commandBuffer)
     raiseGpuError("Failed to begin GPU render pass")
 
-  bindGPUGraphicsPipeline(pass, state.pipeline)
   for model in models:
     state[].drawModel(pass, commandBuffer, model, transform)
   endGPURenderPass(pass)
@@ -727,7 +1070,8 @@ proc render*(artist: Artist3D, models: openArray[Model], transform = identityMat
     raiseGpuError("Failed to submit GPU command buffer")
 
   var dst =
-    FRect(x: 0, y: 0, w: state.textureWidth.cfloat, h: state.textureHeight.cfloat)
+    FRect(x: 0, y: 0, w: state.textureWidth.cfloat,
+        h: state.textureHeight.cfloat)
   discard renderTexture(state.renderer, state.renderTexture, nil, addr dst)
 
 proc render*(artist: Artist3D, model: Model, transform = identityMat4()) =

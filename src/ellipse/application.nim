@@ -12,11 +12,27 @@ export nest except Event, update, draw
 import rendering/artist3D
 import errors
 import inputs as ellipseInputs
+import resources as ellipseResources
 
 type
   NestFontSlot = object
     font: sdl3_ttf.Font
     metrics: screen.FontMetrics
+
+  NestImageSlot = object
+    texture: Texture
+    path: string
+    width, height: int
+
+  NestTextSlot = object
+    texture: Texture
+    extent: screen.TextExtent
+
+  NestDynamicText* = object
+    text*: string
+    fontName*: string
+    fg*: screen.Color
+    bg*: screen.Color
 
   ApplicationConfig* = object
     appname*, appversion*: string
@@ -25,6 +41,7 @@ type
 
 const
   MaxDeltaTime = 0.25'f64
+  MaxNestTextTextures = 2048
   DefaultFontPaths = [
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -36,12 +53,20 @@ var
   nestRenderer: Renderer
   nestWindow: Window
   nestFonts: seq[NestFontSlot]
+  nestImages: seq[NestImageSlot]
+  nestImageByPath: Table[string, screen.Image]
+  nestTextByKey: Table[string, NestTextSlot]
   nestPickedFiles: Table[WidgetID, string]
   nestFilePickerErrors: Table[WidgetID, string]
   nestFallbackFilePickers: Table[WidgetID, osproc.Process]
   nestCachedDrawCommands: seq[screen.DrawCommand]
+  nestDynamicTexts: Table[WidgetID, NestDynamicText]
   hasApplicationRedraw: bool
   applicationRedrawTicks: uint64
+
+proc imgLoad(file: cstring): ptr Surface {.
+  importc: "IMG_Load", cdecl, dynlib: "libSDL3_image.so"
+.}
 
 type Application* = object
   window: Window
@@ -49,6 +74,18 @@ type Application* = object
 
 proc `=copy`*(app: var Application, source: Application) {.error.}
 proc `=destroy`*(app: var Application) =
+  for slot in nestTextByKey.mvalues:
+    if slot.texture != nil:
+      destroyTexture(slot.texture)
+      slot.texture = nil
+  nestTextByKey.clear()
+  for slot in nestImages.mitems:
+    if slot.texture != nil:
+      destroyTexture(slot.texture)
+      slot.texture = nil
+  if nestImages.len > 0:
+    nestImages.setLen(0)
+  nestImageByPath.clear()
   if not app.renderer.isNil:
     destroyRenderer app.renderer
     app.renderer = nil
@@ -80,7 +117,22 @@ proc requestFrameAfter*(ms: int) =
   let ticks = sdl3.getTicks() + max(ms, 0).uint64
   if not hasApplicationRedraw or ticks < applicationRedrawTicks:
     applicationRedrawTicks = ticks
-    hasApplicationRedraw = true
+  hasApplicationRedraw = true
+
+proc setNestDynamicText*(
+    id: WidgetID,
+    text: string,
+    fontName = "font",
+    fg = screen.color(0, 0, 0, 0),
+    bg = screen.color(0, 0, 0, 0),
+) =
+  if id == InvalidWidgetID or text.len == 0:
+    nestDynamicTexts.del(id)
+    return
+  nestDynamicTexts[id] = NestDynamicText(text: text, fontName: fontName, fg: fg, bg: bg)
+
+proc clearNestDynamicText*(id: WidgetID) =
+  nestDynamicTexts.del(id)
 
 proc requestFrame*() =
   requestFrameAfter(0)
@@ -105,8 +157,10 @@ proc nextRedrawDelay(a, b: int): int =
   min(a, b)
 
 proc configureSdlVideoDriver() =
-  if getEnv("SDL_VIDEO_DRIVER").len == 0 and getEnv("SDL_VIDEODRIVER").len == 0 and
-      getEnv("WAYLAND_DISPLAY").len > 0:
+  if (
+    getEnv("SDL_VIDEO_DRIVER").len == 0 and getEnv("SDL_VIDEODRIVER").len == 0 and
+    getEnv("WAYLAND_DISPLAY").len > 0
+  ):
     discard setHint("SDL_VIDEO_DRIVER", "wayland")
 
 proc closeNestFallbackFilePicker(id: WidgetID) =
@@ -195,11 +249,11 @@ proc nestOpenFile(id: WidgetID, defaultLocation: cstring): bool {.cdecl.} =
     echo "file picker requested"
     dialogs.showOpenFileDialog(
       proc(result: dialogs.FileDialogResult) =
-        completed = true
-        selected = not result.canceled and result.paths.len > 0
-        if selected:
-          nestPickedFiles[id] = result.paths[0]
-      ,
+      completed = true
+      selected = not result.canceled and result.paths.len > 0
+      if selected:
+        nestPickedFiles[id] = result.paths[0]
+    ,
       defaultLocation = $defaultLocation,
       allowMany = false,
       window = nestWindow,
@@ -434,31 +488,58 @@ proc nestMeasureText(font: screen.Font, text: string): screen.TextExtent {.nimca
   discard sdl3_ttf.getStringSize(fontPtr, cstring(text), 0, width, height)
   screen.TextExtent(w: width.int, h: height.int)
 
+proc textCacheKey(font: screen.Font, text: string, fg: screen.Color): string =
+  $font.int & "|" & $fg.r & "," & $fg.g & "," & $fg.b & "," & $fg.a & "|" & text
+
+proc clearNestTextCache() =
+  for slot in nestTextByKey.mvalues:
+    if slot.texture != nil:
+      destroyTexture(slot.texture)
+      slot.texture = nil
+  nestTextByKey.clear()
+
+proc cachedNestText(
+    font: screen.Font, text: string, fg: screen.Color
+): NestTextSlot =
+  let key = textCacheKey(font, text, fg)
+  if nestTextByKey.hasKey(key):
+    return nestTextByKey[key]
+  if nestTextByKey.len >= MaxNestTextTextures:
+    clearNestTextCache()
+
+  let fontPtr = nestFontPtr(font)
+  if fontPtr == nil or nestRenderer == nil or text.len == 0:
+    return
+  let fgRgba: chromaColors.ColorRGBA = fg
+  let surface = sdl3_ttf.renderTextBlended(fontPtr, cstring(text), 0,
+      fgRgba.toSdlColor)
+  if surface == nil:
+    return
+  defer:
+    destroySurface(surface)
+  let texture = createTextureFromSurface(nestRenderer, surface)
+  if texture == nil:
+    return
+  discard setTextureBlendMode(texture, BLENDMODE_BLEND)
+  result = NestTextSlot(texture: texture, extent: nestMeasureText(font, text))
+  nestTextByKey[key] = result
+
 proc nestDrawText(
     font: screen.Font, x, y: int, text: string, fg, bg: screen.Color
 ): screen.TextExtent {.nimcall.} =
-  let fontPtr = nestFontPtr(font)
-  if fontPtr == nil or nestRenderer == nil or text.len == 0:
+  let cached = cachedNestText(font, text, fg)
+  if cached.texture == nil:
     return screen.TextExtent()
-  let fgRgba: chromaColors.ColorRGBA = fg
-  let surface = sdl3_ttf.renderTextBlended(fontPtr, cstring(text), 0, fgRgba.toSdlColor)
-  if surface == nil:
-    return screen.TextExtent()
-  let texture = createTextureFromSurface(nestRenderer, surface)
-  if texture == nil:
-    destroySurface(surface)
-    return screen.TextExtent()
-  discard setTextureBlendMode(texture, BLENDMODE_BLEND)
-  result = nestMeasureText(font, text)
+  result = cached.extent
   if bg.a != 0 and result.w > 0 and result.h > 0:
-    var bgRect = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat, h: result.h.cfloat)
+    var bgRect = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat,
+        h: result.h.cfloat)
     setNestRenderDrawColor(bg)
     withNestBlendMode:
       discard renderFillRect(nestRenderer, addr bgRect)
-  var dst = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat, h: result.h.cfloat)
-  discard renderTexture(nestRenderer, texture, nil, addr dst)
-  destroyTexture(texture)
-  destroySurface(surface)
+  var dst = FRect(x: x.cfloat, y: y.cfloat, w: result.w.cfloat,
+      h: result.h.cfloat)
+  discard renderTexture(nestRenderer, cached.texture, nil, addr dst)
 
 proc nestFillRect(r: coords.Rect, color: screen.Color) {.nimcall.} =
   if nestRenderer == nil:
@@ -491,16 +572,53 @@ proc nestDrawPoint(x, y: int, color: screen.Color) {.nimcall.} =
     discard renderPoint(nestRenderer, x.cfloat, y.cfloat)
 
 proc nestLoadImage(path: string): screen.Image {.nimcall.} =
-  screen.Image(0)
+  if path.len == 0 or nestRenderer == nil:
+    return screen.Image(0)
+  if nestImageByPath.hasKey(path):
+    return nestImageByPath[path]
+  let surface = imgLoad(cstring(path))
+  if surface == nil:
+    return screen.Image(0)
+  defer:
+    destroySurface(surface)
+  let texture = createTextureFromSurface(nestRenderer, surface)
+  if texture == nil:
+    return screen.Image(0)
+  discard setTextureBlendMode(texture, BLENDMODE_BLEND)
+  var width, height: cfloat
+  if not getTextureSize(texture, width, height):
+    destroyTexture(texture)
+    return screen.Image(0)
+  nestImages.add NestImageSlot(texture: texture, path: path, width: width.int,
+      height: height.int)
+  result = screen.Image(nestImages.len)
+  nestImageByPath[path] = result
 
 proc nestFreeImage(image: screen.Image) {.nimcall.} =
-  discard
+  let index = image.int - 1
+  if index >= 0 and index < nestImages.len and nestImages[index].texture != nil:
+    if nestImages[index].path.len > 0:
+      nestImageByPath.del nestImages[index].path
+    destroyTexture(nestImages[index].texture)
+    nestImages[index].texture = nil
 
 proc nestDrawImage(image: screen.Image, src, dst: coords.Rect) {.nimcall.} =
-  discard
+  let index = image.int - 1
+  if nestRenderer == nil or index < 0 or index >= nestImages.len:
+    return
+  let texture = nestImages[index].texture
+  if texture == nil:
+    return
+  var source = src.toFRect()
+  var target = dst.toFRect()
+  discard renderTexture(nestRenderer, texture, addr source, addr target)
 
 proc nestImageSize(image: screen.Image): screen.TextExtent {.nimcall.} =
-  screen.TextExtent()
+  let index = image.int - 1
+  if index >= 0 and index < nestImages.len:
+    screen.TextExtent(w: nestImages[index].width, h: nestImages[index].height)
+  else:
+    screen.TextExtent()
 
 proc nestSetClipRect(r: coords.Rect) {.nimcall.} =
   if nestRenderer == nil:
@@ -521,16 +639,16 @@ proc installNestDriver*(app: Application) =
   nestRenderer = app.renderer
   windowRelays = WindowRelays(
     createWindow: proc(layout: var ScreenLayout) =
-      discard,
+    discard,
     refresh: proc() =
-      discard,
+    discard,
     saveState: proc() =
-      discard,
+    discard,
     restoreState: proc() =
-      nestClearClipRect(),
+    nestClearClipRect(),
     setClipRect: nestSetClipRect,
     setCursor: proc(c: CursorKind) =
-      discard,
+    discard,
     setWindowTitle: nestSetWindowTitle,
   )
   fontRelays = FontRelays(
@@ -602,7 +720,8 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
     of LineRect:
       nestLineRect(command.rect, command.color)
     of DrawLine:
-      nestDrawLine(command.x1, command.y1, command.x2, command.y2, command.lineColor)
+      nestDrawLine(command.x1, command.y1, command.x2, command.y2,
+          command.lineColor)
     of DrawPoint:
       nestDrawPoint(command.x, command.y, command.pointColor)
     of DrawText:
@@ -618,7 +737,6 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
       nestDrawImage(command.image, command.src, command.dst)
 
 template renderNest*(ui: var UI, body: untyped) =
-  ui.beginInputFrame()
   ui.setDrawTicks(sdl3.getTicks().int)
   var drawCommands {.inject.}: seq[screen.DrawCommand]
   ui.setDrawCommandRelays(addr drawCommands, nestMeasureText)
@@ -631,10 +749,31 @@ template renderNest*(ui: var UI, body: untyped) =
   if ui.redrewFrame():
     nestCachedDrawCommands = drawCommands
   replayDrawCommands(nestCachedDrawCommands)
-  ui.finishInputFrame()
 
 proc renderCachedNest*() =
   replayDrawCommands(nestCachedDrawCommands)
+
+proc renderNestDynamicTexts(ui: UI) =
+  if nestDynamicTexts.len == 0:
+    return
+  nestClearClipRect()
+  for id, item in nestDynamicTexts.pairs:
+    let frame = ui.widgetFrame(id)
+    if not frame.ok:
+      continue
+    let fg =
+      if item.fg.a == 0:
+        ui.palette.textColor
+      else:
+        item.fg
+    discard nestDrawText(
+      ui.font(item.fontName),
+      frame.frame.x.toInt,
+      frame.frame.y.toInt,
+      item.text,
+      fg,
+      item.bg,
+    )
 
 template sdlApplication(events, step) =
   let frequency = getPerformanceFrequency()
@@ -693,6 +832,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
     var gui {.inject.} = createNest()
     var artist {.inject.} = Artist3D.init(app.renderer)
     var inputs {.inject.} = InputMap.init()
+    var resources {.inject.} = ellipseResources.newResourceManager(app.renderer)
 
     generatePluginFunctionCalls(load)
     let frequency = getPerformanceFrequency()
@@ -702,8 +842,18 @@ template buildApplication*(appConfig: ApplicationConfig) =
       sdlEvent: sdl3.Event
       firstFrame = true
     while running:
+      let initialDelay = nextRedrawDelay(applicationRedrawDelayMs(),
+          gui.redrawDelayMs())
+      let waitMs =
+        if firstFrame or inputs.anyDown or initialDelay == 0:
+          0
+        elif initialDelay < 0:
+          100
+        else:
+          initialDelay
+      gui.beginInputFrame()
       var hadEvent = false
-      hadEvent = waitEventTimeout(sdlEvent, 0)
+      hadEvent = waitEventTimeout(sdlEvent, waitMs.cint)
 
       if hadEvent:
         if sdlEvent.`type` == EVENT_QUIT:
@@ -720,20 +870,28 @@ template buildApplication*(appConfig: ApplicationConfig) =
           generatePluginFunctionCalls(event)
           handleNestEvent(gui, event)
       if not running:
+        gui.finishInputFrame()
         break
 
       let
         appDue = applicationRedrawDelayMs() == 0
         uiDue = gui.redrawDelayMs() == 0
+        frameDue = firstFrame or hadEvent or appDue or uiDue or inputs.anyDown
       if appDue:
         clearDueApplicationRedraw()
       if uiDue:
         gui.clearRedrawRequest()
 
+      if not frameDue:
+        gui.finishInputFrame()
+        inputs.finishFrame()
+        continue
+
       let frameStart = getPerformanceCounter()
       let dt {.inject.} =
         min(secondsBetween(previousTime, frameStart, frequency), MaxDeltaTime)
       previousTime = frameStart
+      resources.poll()
       update(dt)
       draw(app.renderer)
       if firstFrame or hadEvent or uiDue:
@@ -741,6 +899,8 @@ template buildApplication*(appConfig: ApplicationConfig) =
           generatePluginFunctionCalls(ui)
       else:
         renderCachedNest()
+      renderNestDynamicTexts(gui)
       attempt renderPresent(app.renderer), "Failed to present renderer"
+      gui.finishInputFrame()
       inputs.finishFrame()
       firstFrame = false

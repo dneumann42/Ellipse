@@ -199,6 +199,11 @@ proc finishFrame*(inputs: var InputMap) =
 proc down*(inputs: InputMap, id: InputId): bool =
   inputs.states.getOrDefault(id).down
 
+proc anyDown*(inputs: InputMap): bool =
+  for state in inputs.states.values:
+    if state.down:
+      return true
+
 proc pressed*(inputs: InputMap, id: InputId): bool =
   inputs.states.getOrDefault(id).pressed
 
