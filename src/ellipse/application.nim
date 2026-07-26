@@ -904,10 +904,12 @@ template buildApplication*(appConfig: ApplicationConfig) =
         gui.finishInputFrame()
         break
 
+      let watcherDue = pollDynamicPluginWatchers()
       let
         appDue = applicationRedrawDelayMs() == 0
         uiDue = gui.redrawDelayMs() == 0
-        frameDue = firstFrame or hadEvent or appDue or uiDue or inputs.anyDown
+        frameDue =
+          firstFrame or hadEvent or watcherDue or appDue or uiDue or inputs.anyDown
       if appDue:
         clearDueApplicationRedraw()
       if uiDue:
@@ -917,6 +919,13 @@ template buildApplication*(appConfig: ApplicationConfig) =
         gui.finishInputFrame()
         inputs.finishFrame()
         continue
+
+      if hasPendingDynamicPluginReloads():
+        generatePluginFunctionCalls(preReload)
+        if processDynamicPluginReloads():
+          generatePluginFunctionCalls(afterReload)
+          gui.markAllDirty()
+          gui.requestRedrawAfter(0)
 
       let frameStart = getPerformanceCounter()
       let dt {.inject.} =
