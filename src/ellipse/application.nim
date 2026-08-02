@@ -39,9 +39,12 @@ type
     width* = 1280
     height* = 720
     renderNestEveryFrame* = false
+    updateEveryFrame* = true
 
 const
   MaxDeltaTime = 0.25'f64
+  TargetUpdateHz = 60.0'f64
+  FixedUpdateSeconds* = 1.0'f64 / TargetUpdateHz
   MaxNestTextTextures = 2048
   DefaultFontPaths = [
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -61,10 +64,14 @@ var
   nestFilePickerErrors: Table[WidgetID, string]
   nestFallbackFilePickers: Table[WidgetID, osproc.Process]
   nestCachedDrawCommands: seq[screen.DrawCommand]
+  nestCachedTexture: Texture
+  nestCachedTextureWidth: int
+  nestCachedTextureHeight: int
   nestDynamicTexts: Table[WidgetID, NestDynamicText]
   hasApplicationRedraw: bool
-  applicationRedrawTicks: uint64
+  applicationRedrawCounter: uint64
   nestEveryFrameRequested: bool
+  currentFrameDeltaSecondsValue = FixedUpdateSeconds
 
 proc imgLoad(file: cstring): ptr Surface {.
   importc: "IMG_Load", cdecl, dynlib: "libSDL3_image.so"
@@ -91,6 +98,11 @@ proc `=destroy`*(app: var Application) =
   if nestImages.len > 0:
     nestImages.setLen(0)
   nestImageByPath.clear()
+  if nestCachedTexture != nil:
+    destroyTexture(nestCachedTexture)
+    nestCachedTexture = nil
+  nestCachedTextureWidth = 0
+  nestCachedTextureHeight = 0
   if not app.renderer.isNil:
     destroyRenderer app.renderer
     app.renderer = nil
@@ -118,10 +130,50 @@ template attempt(succ: bool, context: string) =
 proc secondsBetween(startCounter, endCounter, frequency: uint64): float64 =
   float64(endCounter - startCounter) / float64(frequency)
 
+proc countersForSeconds(seconds: float64, frequency: uint64): uint64 =
+  max(uint64(seconds * frequency.float64), 1'u64)
+
+proc secondsUntilCounter(target, now, frequency: uint64): float64 =
+  if target <= now:
+    0.0
+  else:
+    secondsBetween(now, target, frequency)
+
+proc minDelay(current, candidate: float64): float64 =
+  if candidate < 0:
+    current
+  else:
+    min(current, candidate)
+
+proc delayFromMs(ms: int): float64 =
+  if ms < 0:
+    -1.0
+  else:
+    ms.float64 / 1000.0
+
+proc currentFrameDeltaSeconds*(): float64 =
+  currentFrameDeltaSecondsValue
+
+proc sleepPreciseSeconds(seconds: float64) =
+  if seconds <= 0:
+    return
+  if seconds > 0.008:
+    sdl3.delay(uint32(max((seconds * 1000.0).int - 5, 1)))
+
+proc clearNestTextureCache() =
+  if nestCachedTexture != nil:
+    destroyTexture(nestCachedTexture)
+    nestCachedTexture = nil
+  nestCachedTextureWidth = 0
+  nestCachedTextureHeight = 0
+
 proc requestFrameAfter*(ms: int) =
-  let ticks = sdl3.getTicks() + max(ms, 0).uint64
-  if not hasApplicationRedraw or ticks < applicationRedrawTicks:
-    applicationRedrawTicks = ticks
+  let
+    frequency = getPerformanceFrequency()
+    delayCounters = countersForSeconds(max(ms, 0).float64 / 1000.0, frequency)
+    counter = getPerformanceCounter() + delayCounters
+  if not hasApplicationRedraw or counter < applicationRedrawCounter:
+    applicationRedrawCounter = counter
   hasApplicationRedraw = true
 
 proc setNestDynamicText*(
@@ -138,6 +190,13 @@ proc setNestDynamicText*(
 
 proc clearNestDynamicText*(id: WidgetID) =
   nestDynamicTexts.del(id)
+
+proc pluginSetNestDynamicText(id: uint64, text: cstring) {.cdecl.} =
+  if text.isNil or ($text).len == 0:
+    nestDynamicTexts.del(WidgetID(id))
+    return
+  nestDynamicTexts[WidgetID(id)] = NestDynamicText(text: $text,
+      fontName: "font")
 
 proc requestFrame*() =
   requestFrameAfter(0)
@@ -157,7 +216,8 @@ proc screenshotName(appname: string): string =
       appname.multiReplace((" ", "_"), ("/", "_"), ("\\", "_"))
   getCurrentDir() / "data" / "screenshots" / (safeName & "-" & $sdl3.getTicks() & ".png")
 
-proc dumpRendererScreenshot*(renderer: Renderer, path: string): bool {.discardable.} =
+proc dumpRendererScreenshot*(renderer: Renderer,
+    path: string): bool {.discardable.} =
   if renderer == nil or path.len == 0:
     return false
   createDir(path.parentDir)
@@ -171,24 +231,12 @@ proc dumpRendererScreenshot*(renderer: Renderer, path: string): bool {.discardab
   if not result:
     debugEcho "Failed to save screenshot ", path, ": ", $sdl3.getError()
 
-proc applicationRedrawDelayMs(): int =
-  if not hasApplicationRedraw:
-    return -1
-  let now = sdl3.getTicks()
-  if applicationRedrawTicks <= now:
-    return 0
-  min(applicationRedrawTicks - now, int32.high.uint64).int
+proc applicationRedrawDue(now: uint64): bool =
+  hasApplicationRedraw and applicationRedrawCounter <= now
 
-proc clearDueApplicationRedraw() =
-  if hasApplicationRedraw and applicationRedrawTicks <= sdl3.getTicks():
+proc clearDueApplicationRedraw(now: uint64) =
+  if hasApplicationRedraw and applicationRedrawCounter <= now:
     hasApplicationRedraw = false
-
-proc nextRedrawDelay(a, b: int): int =
-  if a < 0:
-    return b
-  if b < 0:
-    return a
-  min(a, b)
 
 proc configureSdlVideoDriver() =
   if (
@@ -532,6 +580,35 @@ proc clearNestTextCache() =
       slot.texture = nil
   nestTextByKey.clear()
 
+proc ensureNestTextureCache(width, height: int): bool =
+  if nestRenderer == nil or width <= 0 or height <= 0:
+    clearNestTextureCache()
+    return false
+  if nestCachedTexture != nil and nestCachedTextureWidth == width and
+      nestCachedTextureHeight == height:
+    return true
+  clearNestTextureCache()
+  nestCachedTexture = createTexture(
+    nestRenderer, PIXELFORMAT_RGBA32, TEXTUREACCESS_TARGET, width.cint, height.cint
+  )
+  if nestCachedTexture == nil:
+    return false
+  discard setTextureBlendMode(nestCachedTexture, BLENDMODE_BLEND)
+  nestCachedTextureWidth = width
+  nestCachedTextureHeight = height
+  true
+
+proc blitNestTextureCache() =
+  if nestCachedTexture == nil:
+    return
+  var dst = FRect(
+    x: 0,
+    y: 0,
+    w: nestCachedTextureWidth.cfloat,
+    h: nestCachedTextureHeight.cfloat,
+  )
+  discard renderTexture(nestRenderer, nestCachedTexture, nil, addr dst)
+
 proc cachedNestText(
     font: screen.Font, text: string, fg: screen.Color
 ): NestTextSlot =
@@ -685,6 +762,10 @@ proc nestSetWindowTitle(title: string) {.nimcall.} =
 proc installNestDriver*(app: Application) =
   nestWindow = app.window
   nestRenderer = app.renderer
+  input.inputRelays.getTicks = proc(): int =
+    sdl3.getTicks().int
+  input.inputRelays.sleep = proc(ms: int) =
+    sdl3.delay(max(ms, 0).uint32)
   windowRelays = WindowRelays(
     createWindow: proc(layout: var ScreenLayout) =
     discard,
@@ -722,26 +803,34 @@ proc createNest*(width = 1280, height = 720): UI =
   result.initContext(width, height)
   result.loadFont("font", "", 18)
 
-proc handleNestEvent*(ui: var UI, event: sdl3.Event) =
+proc handleNestEvent*(ui: var UI, event: sdl3.Event): bool =
   let eventType = uint32(event.common.`type`)
   if eventType == uint32(EVENT_WINDOW_RESIZED):
     ui.resizeWindow(event.window.data1, event.window.data2)
     ui.markAllDirty()
+    ui.requestRedrawAfter(0)
+    clearNestTextureCache()
+    return true
   elif eventType == uint32(EVENT_MOUSE_MOTION):
     ui.mouseMove(event.motion.x.int, event.motion.y.int)
+    ui.requestRedrawAfter(0)
+    return true
   elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
       event.button.button == BUTTON_LEFT:
     ui.mouseMove(event.button.x.int, event.button.y.int)
     ui.mouseDown()
     ui.requestRedrawAfter(0)
+    return true
   elif eventType == uint32(EVENT_MOUSE_BUTTON_UP) and event.button.button == BUTTON_LEFT:
     ui.mouseMove(event.button.x.int, event.button.y.int)
     ui.mouseUp()
     ui.requestRedrawAfter(0)
+    return true
   elif eventType == uint32(EVENT_MOUSE_WHEEL):
     ui.mouseMove(event.wheel.mouse_x.int, event.wheel.mouse_y.int)
     ui.mouseWheel(event.wheel.x.float64, event.wheel.y.float64)
     ui.requestRedrawAfter(0)
+    return true
   elif eventType == uint32(EVENT_KEY_DOWN):
     var key = translateNestScancode(event.key.scancode)
     if key == KeyNone:
@@ -749,10 +838,13 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event) =
     if key != KeyNone:
       ui.keyDown(key, translateNestMods(event.key.`mod`))
       ui.requestRedrawAfter(0)
+      return true
   elif eventType == uint32(EVENT_TEXT_INPUT):
     if event.text.text != nil:
       ui.textInput($event.text.text)
       ui.requestRedrawAfter(0)
+      return true
+  false
 
 proc anyBlockedMouseButton(blockedButtons: array[256, bool]): bool =
   for blocked in blockedButtons:
@@ -827,10 +919,27 @@ template renderNest*(ui: var UI, body: untyped) =
   ui.setIO(IO())
   if ui.redrewFrame():
     nestCachedDrawCommands = drawCommands
-  replayDrawCommands(nestCachedDrawCommands)
+    if ensureNestTextureCache(ui.windowWidth, ui.windowHeight):
+      let previousTarget = getRenderTarget(nestRenderer)
+      discard setRenderTarget(nestRenderer, nestCachedTexture)
+      discard setRenderDrawColor(nestRenderer, 0, 0, 0, 0)
+      discard renderClear(nestRenderer)
+      replayDrawCommands(nestCachedDrawCommands)
+      discard setRenderTarget(nestRenderer, previousTarget)
+      blitNestTextureCache()
+    else:
+      replayDrawCommands(nestCachedDrawCommands)
+  else:
+    if nestCachedTexture != nil:
+      blitNestTextureCache()
+    else:
+      replayDrawCommands(nestCachedDrawCommands)
 
 proc renderCachedNest*() =
-  replayDrawCommands(nestCachedDrawCommands)
+  if nestCachedTexture != nil:
+    blitNestTextureCache()
+  else:
+    replayDrawCommands(nestCachedDrawCommands)
 
 proc renderNestDynamicTexts(ui: UI) =
   if nestDynamicTexts.len == 0:
@@ -845,10 +954,16 @@ proc renderNestDynamicTexts(ui: UI) =
         ui.palette.textColor
       else:
         item.fg
+    let extent = nestMeasureText(ui.font(item.fontName), item.text)
+    let
+      textX = frame.frame.x.toInt +
+        max((frame.frame.width.toInt - extent.w) div 2, 0)
+      textY = frame.frame.y.toInt +
+        max((frame.frame.height.toInt - extent.h) div 2, 0)
     discard nestDrawText(
       ui.font(item.fontName),
-      frame.frame.x.toInt,
-      frame.frame.y.toInt,
+      textX,
+      textY,
       item.text,
       fg,
       item.bg,
@@ -909,41 +1024,55 @@ template buildApplication*(appConfig: ApplicationConfig) =
     app.installNestDriver()
 
     var gui {.inject.} = createNest()
+    plugnimSetWidgetTextCallback = pluginSetNestDynamicText
     var artist {.inject.} = Artist3D.init(app.renderer)
     var inputs {.inject.} = InputMap.init()
     var resources {.inject.} = ellipseResources.newResourceManager(app.renderer)
 
     generatePluginFunctionCalls(load)
-    let frequency = getPerformanceFrequency()
+    let
+      frequency = getPerformanceFrequency()
+      updateStepCounters = countersForSeconds(FixedUpdateSeconds, frequency)
     var
       running {.inject.} = true
       previousTime = getPerformanceCounter()
+      nextUpdateCounter = previousTime
       sdlEvent: sdl3.Event
       firstFrame = true
       blockedMouseButtons: array[256, bool]
       screenshotRequested = false
       autoScreenshotAt = 0'u64
+      benchFrames = 0
+      benchFrameCount = 0
+      benchUpdateSeconds = 0.0
+      benchDrawSeconds = 0.0
+      benchUiSeconds = 0.0
+      benchPresentSeconds = 0.0
+      benchFrameSeconds = 0.0
+      benchFrameIntervalSeconds = 0.0
+      benchFullUiFrames = 0
+      benchCachedUiFrames = 0
+      benchUiDueFrames = 0
+      benchNestEveryFrameFrames = 0
     let autoScreenshotDelay = getEnv("ELLIPSE_SCREENSHOT_AFTER_MS")
     if autoScreenshotDelay.len > 0:
       try:
-        autoScreenshotAt = sdl3.getTicks() + parseInt(autoScreenshotDelay).uint64
+        autoScreenshotAt = sdl3.getTicks() + parseInt(
+            autoScreenshotDelay).uint64
       except ValueError:
         debugEcho "Ignoring invalid ELLIPSE_SCREENSHOT_AFTER_MS: ", autoScreenshotDelay
+    let benchFramesValue = getEnv("ELLIPSE_BENCH_FRAMES")
+    if benchFramesValue.len > 0:
+      try:
+        benchFrames = max(parseInt(benchFramesValue), 0)
+      except ValueError:
+        debugEcho "Ignoring invalid ELLIPSE_BENCH_FRAMES: ", benchFramesValue
     while running:
-      let initialDelay = nextRedrawDelay(applicationRedrawDelayMs(),
-          gui.redrawDelayMs())
-      let waitMs =
-        if firstFrame or inputs.anyDown or initialDelay == 0:
-          0
-        elif initialDelay < 0:
-          100
-        else:
-          initialDelay
       gui.beginInputFrame()
       var hadEvent = false
-      hadEvent = waitEventTimeout(sdlEvent, waitMs.cint)
-
-      if hadEvent:
+      var nestInputDue = false
+      while pollEvent(sdlEvent):
+        hadEvent = true
         if sdlEvent.`type` == EVENT_QUIT:
           running = false
         elif sdlEvent.`type` == EVENT_KEY_DOWN and
@@ -951,24 +1080,11 @@ template buildApplication*(appConfig: ApplicationConfig) =
             (sdlEvent.key.`mod`.uint32 and KMOD_CTRL) != 0:
           screenshotRequested = true
           requestFrameAfter(0)
-        handleNestEvent(gui, sdlEvent)
+        nestInputDue = handleNestEvent(gui, sdlEvent) or nestInputDue
         if not nestBlocksInputEvent(gui, sdlEvent, blockedMouseButtons):
           inputs.handleEvent(sdlEvent)
         let event {.inject.} = sdlEvent
         generatePluginFunctionCalls(event)
-        while pollEvent(sdlEvent):
-          if sdlEvent.`type` == EVENT_QUIT:
-            running = false
-          elif sdlEvent.`type` == EVENT_KEY_DOWN and
-              sdlEvent.key.scancode == SCANCODE_F12 and
-              (sdlEvent.key.`mod`.uint32 and KMOD_CTRL) != 0:
-            screenshotRequested = true
-            requestFrameAfter(0)
-          handleNestEvent(gui, sdlEvent)
-          if not nestBlocksInputEvent(gui, sdlEvent, blockedMouseButtons):
-            inputs.handleEvent(sdlEvent)
-          let event {.inject.} = sdlEvent
-          generatePluginFunctionCalls(event)
       if not running:
         gui.finishInputFrame()
         break
@@ -983,29 +1099,53 @@ template buildApplication*(appConfig: ApplicationConfig) =
         autoScreenshotAt = 0
       if buildActive:
         gui.requestRedrawAfter(100)
+      if watcherDue or buildStarted or buildFinished:
+        gui.markAllDirty()
+        gui.requestRedrawAfter(0)
       let pluginFrameRequested = consumeRuntimeFrameRequest()
       let nestEveryFrame =
-        appConfig.renderNestEveryFrame or nestEveryFrameRequested or
-        pluginFrameRequested
+        appConfig.renderNestEveryFrame or nestEveryFrameRequested
       nestEveryFrameRequested = false
-      if nestEveryFrame:
+      if nestEveryFrame or pluginFrameRequested:
         requestFrameAfter(0)
+      var forceNestUiRedraw = watcherDue or buildStarted or buildFinished
+      let nowCounter = getPerformanceCounter()
       let
-        appDue = applicationRedrawDelayMs() == 0
+        updateDue =
+          firstFrame or (appConfig.updateEveryFrame and nowCounter >= nextUpdateCounter)
+        appDue = applicationRedrawDue(nowCounter)
         uiDue = gui.redrawDelayMs() == 0
+        pendingWidgetEvents = gui.hasPendingWidgetEvents()
         frameDue =
-          firstFrame or hadEvent or watcherDue or buildStarted or
-              buildFinished or
-          appDue or uiDue or inputs.anyDown
-      if appDue:
-        clearDueApplicationRedraw()
-      if uiDue:
-        gui.clearRedrawRequest()
-
+          if appConfig.updateEveryFrame:
+            firstFrame or updateDue or nestInputDue or pendingWidgetEvents or
+                appDue or uiDue or watcherDue or buildStarted or buildFinished
+          else:
+            firstFrame or hadEvent or watcherDue or buildStarted or
+                buildFinished or
+            appDue or uiDue or inputs.anyDown
       if not frameDue:
+        var sleepSeconds = 0.1
+        if appConfig.updateEveryFrame:
+          sleepSeconds = min(
+            sleepSeconds, secondsUntilCounter(nextUpdateCounter, nowCounter, frequency)
+          )
+        if hasApplicationRedraw:
+          sleepSeconds = min(
+            sleepSeconds,
+            secondsUntilCounter(applicationRedrawCounter, nowCounter,
+                frequency),
+          )
+        sleepSeconds = minDelay(sleepSeconds, delayFromMs(gui.redrawDelayMs()))
         gui.finishInputFrame()
         inputs.finishFrame()
+        sleepPreciseSeconds(sleepSeconds)
         continue
+
+      if appDue:
+        clearDueApplicationRedraw(nowCounter)
+      if uiDue:
+        gui.clearRedrawRequest()
 
       if hasReadyDynamicPluginReloads():
         generatePluginFunctionCalls(preReload)
@@ -1013,27 +1153,88 @@ template buildApplication*(appConfig: ApplicationConfig) =
           generatePluginFunctionCalls(afterReload)
           gui.markAllDirty()
           gui.requestRedrawAfter(0)
+          forceNestUiRedraw = true
 
-      let frameStart = getPerformanceCounter()
-      let dt {.inject.} =
-        min(secondsBetween(previousTime, frameStart, frequency), MaxDeltaTime)
+      var frameStart = getPerformanceCounter()
+      let actualFrameDt = min(
+        secondsBetween(previousTime, frameStart, frequency), MaxDeltaTime
+      )
+      currentFrameDeltaSecondsValue = actualFrameDt
       previousTime = frameStart
+      let dt {.inject.} =
+        if appConfig.updateEveryFrame:
+          if updateDue:
+            FixedUpdateSeconds
+          else:
+            0.0
+        else:
+          actualFrameDt
       resources.poll()
+      let benchFrameStart = getPerformanceCounter()
+      let benchUpdateStart = benchFrameStart
       update(dt)
+      let benchDrawStart = getPerformanceCounter()
       draw(app.renderer)
-      let renderNestUi = firstFrame or hadEvent or uiDue or nestEveryFrame
+      let benchUiStart = getPerformanceCounter()
+      let renderNestUi =
+        firstFrame or nestCachedDrawCommands.len == 0 or nestInputDue or
+            pendingWidgetEvents or uiDue or nestEveryFrame or forceNestUiRedraw
       if renderNestUi:
+        if benchFrames > 0 and not firstFrame:
+          inc benchFullUiFrames
+          if uiDue:
+            inc benchUiDueFrames
+          if nestEveryFrame:
+            inc benchNestEveryFrameFrames
         renderNest(gui):
           generatePluginFunctionCalls(ui)
       else:
+        if benchFrames > 0 and not firstFrame:
+          inc benchCachedUiFrames
         renderCachedNest()
       renderNestDynamicTexts(gui)
+      generatePluginFunctionCalls(postUi)
+      let benchPresentStart = getPerformanceCounter()
       if screenshotRequested:
         let path = screenshotName(appConfig.appname)
         if dumpRendererScreenshot(app.renderer, path):
           debugEcho "Saved screenshot: ", path
         screenshotRequested = false
       attempt renderPresent(app.renderer), "Failed to present renderer"
+      let benchFrameEnd = getPerformanceCounter()
+      if updateDue:
+        while nextUpdateCounter <= benchFrameEnd:
+          nextUpdateCounter += updateStepCounters
+      if benchFrames > 0:
+        if not firstFrame:
+          inc benchFrameCount
+          benchUpdateSeconds += secondsBetween(
+            benchUpdateStart, benchDrawStart, frequency
+          )
+          benchDrawSeconds += secondsBetween(benchDrawStart, benchUiStart, frequency)
+          benchUiSeconds += secondsBetween(benchUiStart, benchPresentStart, frequency)
+          benchPresentSeconds += secondsBetween(
+            benchPresentStart, benchFrameEnd, frequency
+          )
+          benchFrameSeconds += secondsBetween(benchFrameStart, benchFrameEnd, frequency)
+          benchFrameIntervalSeconds += actualFrameDt
+          if benchFrameCount >= benchFrames:
+            let count = benchFrameCount.float64
+            echo "bench frames: ", benchFrameCount
+            echo "bench fps: ", count / benchFrameSeconds
+            echo "bench cadence fps: ", count / benchFrameIntervalSeconds
+            echo "bench fixed update hz: ", 1.0 / FixedUpdateSeconds
+            echo "bench full ui frames: ", benchFullUiFrames
+            echo "bench cached ui frames: ", benchCachedUiFrames
+            echo "bench ui due frames: ", benchUiDueFrames
+            echo "bench nest every frame frames: ", benchNestEveryFrameFrames
+            echo "bench update ms: ", benchUpdateSeconds * 1000 / count
+            echo "bench draw ms: ", benchDrawSeconds * 1000 / count
+            echo "bench ui ms: ", benchUiSeconds * 1000 / count
+            echo "bench present ms: ", benchPresentSeconds * 1000 / count
+            running = false
+        if running and not appConfig.updateEveryFrame:
+          requestFrameAfter(0)
       gui.finishInputFrame()
       inputs.finishFrame()
       firstFrame = false
