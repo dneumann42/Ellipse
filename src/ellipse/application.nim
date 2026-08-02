@@ -38,6 +38,7 @@ type
     appname*, appversion*: string
     width* = 1280
     height* = 720
+    renderNestEveryFrame* = false
 
 const
   MaxDeltaTime = 0.25'f64
@@ -63,9 +64,13 @@ var
   nestDynamicTexts: Table[WidgetID, NestDynamicText]
   hasApplicationRedraw: bool
   applicationRedrawTicks: uint64
+  nestEveryFrameRequested: bool
 
 proc imgLoad(file: cstring): ptr Surface {.
   importc: "IMG_Load", cdecl, dynlib: "libSDL3_image.so"
+.}
+proc imgSavePng(surface: ptr Surface, file: cstring): bool {.
+  importc: "IMG_SavePNG", cdecl, dynlib: "libSDL3_image.so"
 .}
 
 type Application* = object
@@ -136,6 +141,35 @@ proc clearNestDynamicText*(id: WidgetID) =
 
 proc requestFrame*() =
   requestFrameAfter(0)
+
+proc requestNestEveryFrame*() =
+  nestEveryFrameRequested = true
+  requestFrameAfter(0)
+
+proc stopNestEveryFrame*() =
+  nestEveryFrameRequested = false
+
+proc screenshotName(appname: string): string =
+  let safeName =
+    if appname.len == 0:
+      "ellipse"
+    else:
+      appname.multiReplace((" ", "_"), ("/", "_"), ("\\", "_"))
+  getCurrentDir() / "data" / "screenshots" / (safeName & "-" & $sdl3.getTicks() & ".png")
+
+proc dumpRendererScreenshot*(renderer: Renderer, path: string): bool {.discardable.} =
+  if renderer == nil or path.len == 0:
+    return false
+  createDir(path.parentDir)
+  let surface = renderReadPixels(renderer, nil)
+  if surface == nil:
+    debugEcho "Failed to read renderer pixels for screenshot: ", $sdl3.getError()
+    return false
+  defer:
+    destroySurface(surface)
+  result = imgSavePng(surface, cstring(path))
+  if not result:
+    debugEcho "Failed to save screenshot ", path, ": ", $sdl3.getError()
 
 proc applicationRedrawDelayMs(): int =
   if not hasApplicationRedraw:
@@ -578,17 +612,23 @@ proc nestLoadImage(path: string): screen.Image {.nimcall.} =
     return screen.Image(0)
   if nestImageByPath.hasKey(path):
     return nestImageByPath[path]
+
   let surface = imgLoad(cstring(path))
   if surface == nil:
+    debugEcho "Nest image load failed: ", path
     return screen.Image(0)
   defer:
     destroySurface(surface)
+
   let texture = createTextureFromSurface(nestRenderer, surface)
   if texture == nil:
+    debugEcho "Nest image texture creation failed: ", path
     return screen.Image(0)
+
   discard setTextureBlendMode(texture, BLENDMODE_BLEND)
   var width, height: cfloat
   if not getTextureSize(texture, width, height):
+    debugEcho "Nest image size failed: ", path
     destroyTexture(texture)
     return screen.Image(0)
   nestImages.add NestImageSlot(texture: texture, path: path, width: width.int,
@@ -621,6 +661,12 @@ proc nestImageSize(image: screen.Image): screen.TextExtent {.nimcall.} =
     screen.TextExtent(w: nestImages[index].width, h: nestImages[index].height)
   else:
     screen.TextExtent()
+
+proc nestMeasureImage(path: string): screen.TextExtent {.nimcall.} =
+  let image = nestLoadImage(path)
+  if image.int == 0:
+    return screen.TextExtent()
+  nestImageSize(image)
 
 proc nestSetClipRect(r: coords.Rect) {.nimcall.} =
   if nestRenderer == nil:
@@ -762,17 +808,22 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
         command.bg,
       )
     of DrawImage:
-      nestDrawImage(command.image, command.src, command.dst)
+      if command.imagePath.len > 0:
+        let image = nestLoadImage(command.imagePath)
+        if image.int != 0:
+          nestDrawImage(image, command.src, command.dst)
+      else:
+        nestDrawImage(command.image, command.src, command.dst)
 
 template renderNest*(ui: var UI, body: untyped) =
   ui.setDrawTicks(sdl3.getTicks().int)
   var drawCommands {.inject.}: seq[screen.DrawCommand]
-  ui.setDrawCommandRelays(addr drawCommands, nestMeasureText)
+  ui.setDrawCommandRelays(addr drawCommands, nestMeasureText, nestMeasureImage)
   pollNestFallbackFilePickers()
   var io {.inject.} = nestIO()
   ui.setIO(io)
   body
-  ui.setDrawCommandRelays(nil, nil)
+  ui.setDrawCommandRelays(nil, nil, nil)
   ui.setIO(IO())
   if ui.redrewFrame():
     nestCachedDrawCommands = drawCommands
@@ -870,6 +921,14 @@ template buildApplication*(appConfig: ApplicationConfig) =
       sdlEvent: sdl3.Event
       firstFrame = true
       blockedMouseButtons: array[256, bool]
+      screenshotRequested = false
+      autoScreenshotAt = 0'u64
+    let autoScreenshotDelay = getEnv("ELLIPSE_SCREENSHOT_AFTER_MS")
+    if autoScreenshotDelay.len > 0:
+      try:
+        autoScreenshotAt = sdl3.getTicks() + parseInt(autoScreenshotDelay).uint64
+      except ValueError:
+        debugEcho "Ignoring invalid ELLIPSE_SCREENSHOT_AFTER_MS: ", autoScreenshotDelay
     while running:
       let initialDelay = nextRedrawDelay(applicationRedrawDelayMs(),
           gui.redrawDelayMs())
@@ -887,6 +946,11 @@ template buildApplication*(appConfig: ApplicationConfig) =
       if hadEvent:
         if sdlEvent.`type` == EVENT_QUIT:
           running = false
+        elif sdlEvent.`type` == EVENT_KEY_DOWN and
+            sdlEvent.key.scancode == SCANCODE_F12 and
+            (sdlEvent.key.`mod`.uint32 and KMOD_CTRL) != 0:
+          screenshotRequested = true
+          requestFrameAfter(0)
         handleNestEvent(gui, sdlEvent)
         if not nestBlocksInputEvent(gui, sdlEvent, blockedMouseButtons):
           inputs.handleEvent(sdlEvent)
@@ -895,6 +959,11 @@ template buildApplication*(appConfig: ApplicationConfig) =
         while pollEvent(sdlEvent):
           if sdlEvent.`type` == EVENT_QUIT:
             running = false
+          elif sdlEvent.`type` == EVENT_KEY_DOWN and
+              sdlEvent.key.scancode == SCANCODE_F12 and
+              (sdlEvent.key.`mod`.uint32 and KMOD_CTRL) != 0:
+            screenshotRequested = true
+            requestFrameAfter(0)
           handleNestEvent(gui, sdlEvent)
           if not nestBlocksInputEvent(gui, sdlEvent, blockedMouseButtons):
             inputs.handleEvent(sdlEvent)
@@ -904,12 +973,30 @@ template buildApplication*(appConfig: ApplicationConfig) =
         gui.finishInputFrame()
         break
 
-      let watcherDue = pollDynamicPluginWatchers()
+      let
+        watcherDue = pollDynamicPluginWatchers()
+        buildStarted = processDynamicPluginReloads()
+        buildFinished = pollDynamicPluginBuilds()
+        buildActive = hasActiveDynamicPluginBuilds()
+      if autoScreenshotAt > 0 and sdl3.getTicks() >= autoScreenshotAt:
+        screenshotRequested = true
+        autoScreenshotAt = 0
+      if buildActive:
+        gui.requestRedrawAfter(100)
+      let pluginFrameRequested = consumeRuntimeFrameRequest()
+      let nestEveryFrame =
+        appConfig.renderNestEveryFrame or nestEveryFrameRequested or
+        pluginFrameRequested
+      nestEveryFrameRequested = false
+      if nestEveryFrame:
+        requestFrameAfter(0)
       let
         appDue = applicationRedrawDelayMs() == 0
         uiDue = gui.redrawDelayMs() == 0
         frameDue =
-          firstFrame or hadEvent or watcherDue or appDue or uiDue or inputs.anyDown
+          firstFrame or hadEvent or watcherDue or buildStarted or
+              buildFinished or
+          appDue or uiDue or inputs.anyDown
       if appDue:
         clearDueApplicationRedraw()
       if uiDue:
@@ -920,9 +1007,9 @@ template buildApplication*(appConfig: ApplicationConfig) =
         inputs.finishFrame()
         continue
 
-      if hasPendingDynamicPluginReloads():
+      if hasReadyDynamicPluginReloads():
         generatePluginFunctionCalls(preReload)
-        if processDynamicPluginReloads():
+        if activateReadyDynamicPluginReloads():
           generatePluginFunctionCalls(afterReload)
           gui.markAllDirty()
           gui.requestRedrawAfter(0)
@@ -934,12 +1021,18 @@ template buildApplication*(appConfig: ApplicationConfig) =
       resources.poll()
       update(dt)
       draw(app.renderer)
-      if firstFrame or hadEvent or uiDue:
+      let renderNestUi = firstFrame or hadEvent or uiDue or nestEveryFrame
+      if renderNestUi:
         renderNest(gui):
           generatePluginFunctionCalls(ui)
       else:
         renderCachedNest()
       renderNestDynamicTexts(gui)
+      if screenshotRequested:
+        let path = screenshotName(appConfig.appname)
+        if dumpRendererScreenshot(app.renderer, path):
+          debugEcho "Saved screenshot: ", path
+        screenshotRequested = false
       attempt renderPresent(app.renderer), "Failed to present renderer"
       gui.finishInputFrame()
       inputs.finishFrame()

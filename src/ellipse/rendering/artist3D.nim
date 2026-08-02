@@ -26,14 +26,29 @@ type
   MeshRenderMode* = enum
     SolidMesh, WireframeMesh
 
+  RenderEffect* = enum
+    StandardEffect, WaterEffect
+
   TextureSampling* = enum
     Single, Splat
 
+  WaterRenderOptions* = object
+    time*: float32
+    waveAmplitude*: float32
+    waveLength*: float32
+    waveSpeed*: float32
+    surfaceColor*: Vec3
+    deepColor*: Vec3
+    opacity*: float32
+    specularStrength*: float32
+
   RenderOptions* = object
+    effect*: RenderEffect
     mode*: MeshRenderMode
     depthWrite*: bool
     baseColor*: Vec3
     materialID*: string
+    water*: WaterRenderOptions
 
   Material* = object
     id*: string
@@ -72,13 +87,25 @@ type
     useTexture: float32
     splat: Vec4
 
+  WaterUniforms = object
+    cameraPosition: Vec3
+    time: float32
+    surfaceColor: Vec3
+    waveAmplitude: float32
+    deepColor: Vec3
+    waveLength: float32
+    opacity: float32
+    waveSpeed: float32
+    specularStrength: float32
+    padding: float32
+
 type
   Artist3DState = object
     renderer: Renderer
     device: GPUDevice
-    solidPipeline, wireframePipeline: GPUGraphicsPipeline
-    vertexShader: GPUShader
-    fragmentShader: GPUShader
+    solidPipeline, wireframePipeline, waterPipeline: GPUGraphicsPipeline
+    vertexShader, waterVertexShader: GPUShader
+    fragmentShader, waterFragmentShader: GPUShader
     meshes: Table[MeshID, Mesh]
     materials: Table[string, GpuMaterial]
     sampler: pointer
@@ -244,8 +271,13 @@ proc loadShaderCode(name: string): string =
   if result.len == 0:
     raiseGpuError(&"Shader {path} is empty")
 
-proc createShader(device: GPUDevice, name: string,
-    stage: GPUShaderStage): GPUShader =
+proc createShader(
+    device: GPUDevice,
+    name: string,
+    stage: GPUShaderStage,
+    uniformBuffers = 1'u32,
+    samplers = 0'u32,
+): GPUShader =
   let code = loadShaderCode(name)
   var info = GPUShaderCreateInfo(
     code_size: code.len.csize_t,
@@ -253,8 +285,8 @@ proc createShader(device: GPUDevice, name: string,
     entrypoint: cstring"main",
     format: GPU_SHADERFORMAT_SPIRV.GPUShaderFormat,
     stage: stage,
-    num_samplers: if stage == GPU_SHADERSTAGE_FRAGMENT: 1'u32 else: 0'u32,
-    num_uniform_buffers: 1,
+    num_samplers: samplers,
+    num_uniform_buffers: uniformBuffers,
   )
   result = createGPUShader(device, addr info)
   if result.isNil:
@@ -277,14 +309,42 @@ proc identityMat4(): Mat4 =
   result[3, 3] = 1
 
 proc init*(
+    T: typedesc[WaterRenderOptions],
+    time = 0'f32,
+    waveAmplitude = 0.12'f32,
+    waveLength = 9'f32,
+    waveSpeed = 0.8'f32,
+    surfaceColor = vec3(0.2'f32, 0.75'f32, 0.92'f32),
+    deepColor = vec3(0.01'f32, 0.16'f32, 0.28'f32),
+    opacity = 0.82'f32,
+    specularStrength = 0.55'f32,
+): T =
+  T(
+    time: time,
+    waveAmplitude: waveAmplitude,
+    waveLength: waveLength,
+    waveSpeed: waveSpeed,
+    surfaceColor: surfaceColor,
+    deepColor: deepColor,
+    opacity: opacity,
+    specularStrength: specularStrength,
+  )
+
+proc init*(
     T: typedesc[RenderOptions],
     mode = SolidMesh,
     depthWrite = true,
     baseColor = vec3(0.9'f32, 0.52'f32, 0.22'f32),
     materialID = "",
 ): T =
-  T(mode: mode, depthWrite: depthWrite, baseColor: baseColor,
-      materialID: materialID)
+  T(
+    effect: StandardEffect,
+    mode: mode,
+    depthWrite: depthWrite,
+    baseColor: baseColor,
+    materialID: materialID,
+    water: WaterRenderOptions.init(),
+  )
 
 proc init*(
     T: typedesc[Model],
@@ -328,6 +388,18 @@ proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
       max(material.atlasRows, 1).float32,
       0,
     )
+
+proc waterUniforms(artist: Artist3DState, model: Model): WaterUniforms =
+  let water = model.renderOptions.water
+  result.cameraPosition = artist.activeCamera.position
+  result.time = water.time
+  result.surfaceColor = water.surfaceColor
+  result.waveAmplitude = water.waveAmplitude
+  result.deepColor = water.deepColor
+  result.waveLength = max(water.waveLength, 0.001'f32)
+  result.opacity = clamp(water.opacity, 0'f32, 1'f32)
+  result.waveSpeed = water.waveSpeed
+  result.specularStrength = max(water.specularStrength, 0'f32)
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -377,6 +449,9 @@ proc releasePipelines(artist: var Artist3DState) =
   if not artist.wireframePipeline.isNil:
     releaseGPUGraphicsPipeline(artist.device, artist.wireframePipeline)
     artist.wireframePipeline = nil
+  if not artist.waterPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.waterPipeline)
+    artist.waterPipeline = nil
 
 proc createMeshBuffer(
     artist: var Artist3DState, usage: GPUBufferUsageFlags, size: uint32,
@@ -754,14 +829,101 @@ proc createTrianglePipeline(
   if result.isNil:
     raiseGpuError("Failed to create GPU graphics pipeline")
 
+proc createWaterPipeline(artist: var Artist3DState): GPUGraphicsPipeline =
+  var vertexBuffers = [
+    GPUVertexBufferDescription(
+      slot: 0, pitch: sizeof(Vertex).uint32,
+          input_rate: GPU_VERTEXINPUTRATE_VERTEX
+    )
+  ]
+  var vertexAttributes = [
+    GPUVertexAttribute(
+      location: 0,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT3,
+      offset: offsetof(Vertex, position).uint32,
+    ),
+    GPUVertexAttribute(
+      location: 1,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT3,
+      offset: offsetof(Vertex, normal).uint32,
+    ),
+    GPUVertexAttribute(
+      location: 2,
+      buffer_slot: 0,
+      format: GPU_VERTEXELEMENTFORMAT_FLOAT2,
+      offset: offsetof(Vertex, uv).uint32,
+    ),
+  ]
+  var colorTarget = GPUColorTargetDescription(
+    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+    blend_state: GPUColorTargetBlendState(
+      src_color_blendfactor: GPU_BLENDFACTOR_SRC_ALPHA,
+      dst_color_blendfactor: GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+      color_blend_op: GPU_BLENDOP_ADD,
+      src_alpha_blendfactor: GPU_BLENDFACTOR_ONE,
+      dst_alpha_blendfactor: GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+      alpha_blend_op: GPU_BLENDOP_ADD,
+      color_write_mask: (
+        GPU_COLORCOMPONENT_R or GPU_COLORCOMPONENT_G or GPU_COLORCOMPONENT_B or
+        GPU_COLORCOMPONENT_A
+    ).GPUColorComponentFlags,
+    enable_blend: true,
+    enable_color_write_mask: true,
+  ),
+  )
+  var targetInfo = GPUGraphicsPipelineTargetInfo(
+    color_target_descriptions:
+    cast[ptr UncheckedArray[GPUColorTargetDescription]](addr colorTarget),
+    num_color_targets: 1,
+    depth_stencil_format: GPU_TEXTUREFORMAT_D16_UNORM,
+    has_depth_stencil_target: true,
+  )
+  var pipelineInfo = GpuGraphicsPipelineCreateInfo(
+    vertex_shader: artist.waterVertexShader,
+    fragment_shader: artist.waterFragmentShader,
+    vertex_input_state: GPUVertexInputState(
+      vertex_buffer_descriptions:
+    cast[ptr UncheckedArray[GPUVertexBufferDescription]](addr vertexBuffers[0]),
+      num_vertex_buffers: vertexBuffers.len.uint32,
+      vertex_attributes:
+    cast[ptr UncheckedArray[GPUVertexAttribute]](addr vertexAttributes[0]),
+      num_vertex_attributes: vertexAttributes.len.uint32,
+    ),
+    primitive_type: GPU_PRIMITIVETYPE_TRIANGLELIST,
+    rasterizer_state: GPURasterizerState(
+      fill_mode: GPU_FILLMODE_FILL,
+      cull_mode: GPU_CULLMODE_NONE,
+      front_face: GPU_FRONTFACE_CLOCKWISE,
+    ),
+    multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    depth_stencil_state: GPUDepthStencilState(
+      compare_op: GPU_COMPAREOP_LESS_OR_EQUAL,
+      enable_depth_test: true,
+      enable_depth_write: false,
+    ),
+    target_info: targetInfo,
+  )
+  result = createGpuGraphicsPipeline(artist.device, addr pipelineInfo)
+  if result.isNil:
+    raiseGpuError("Failed to create GPU water pipeline")
+
 proc createTrianglePipelines(artist: var Artist3DState) =
   artist.releasePipelines()
   artist.vertexShader =
     createShader(artist.device, "triangle.vert.spv", GPU_SHADERSTAGE_VERTEX)
   artist.fragmentShader =
-    createShader(artist.device, "triangle.frag.spv", GPU_SHADERSTAGE_FRAGMENT)
+    createShader(
+      artist.device, "triangle.frag.spv", GPU_SHADERSTAGE_FRAGMENT, samplers = 1
+    )
+  artist.waterVertexShader =
+    createShader(artist.device, "water.vert.spv", GPU_SHADERSTAGE_VERTEX, 2)
+  artist.waterFragmentShader =
+    createShader(artist.device, "water.frag.spv", GPU_SHADERSTAGE_FRAGMENT, 2)
   artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true)
   artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, false)
+  artist.waterPipeline = artist.createWaterPipeline()
 
 proc installArtist3DRenderer*(renderer: Renderer) =
   defaultRenderer = renderer
@@ -899,6 +1061,32 @@ proc markMeshDirty*(artist: Artist3D, meshID: MeshID) =
 proc markMeshDirty*(artist: Artist3D) =
   artist.markMeshDirty(DefaultMeshID)
 
+proc createPlaneMesh*(
+    size = vec2(1'f32, 1'f32), subdivisions = 96
+): tuple[vertices: seq[Vertex], indices: seq[uint32]] =
+  let steps = max(subdivisions, 1)
+  for z in 0 .. steps:
+    for x in 0 .. steps:
+      let
+        u = x.float32 / steps.float32
+        v = z.float32 / steps.float32
+        position = vec3((u - 0.5'f32) * size.x, 0, (v - 0.5'f32) * size.y)
+      result.vertices.add Vertex(position: position, normal: vec3(0, 1, 0),
+          uv: vec2(u, v))
+  for z in 0 ..< steps:
+    for x in 0 ..< steps:
+      let
+        a = (z * (steps + 1) + x).uint32
+        b = a + 1
+        c = ((z + 1) * (steps + 1) + x).uint32
+        d = c + 1
+      result.indices.add a
+      result.indices.add c
+      result.indices.add b
+      result.indices.add b
+      result.indices.add c
+      result.indices.add d
+
 proc defaultModel*(artist: Artist3D): Model =
   if artist.state.isNil:
     return Model.init(DefaultMeshID)
@@ -1018,9 +1206,13 @@ proc drawModel(
     return
 
   let pipeline =
-    case model.renderOptions.mode
-    of SolidMesh: state.solidPipeline
-    of WireframeMesh: state.wireframePipeline
+    case model.renderOptions.effect
+    of WaterEffect:
+      state.waterPipeline
+    of StandardEffect:
+      case model.renderOptions.mode
+      of SolidMesh: state.solidPipeline
+      of WireframeMesh: state.wireframePipeline
   if pipeline.isNil:
     return
 
@@ -1028,6 +1220,7 @@ proc drawModel(
   var indexBinding = GpuBufferBinding(buffer: mesh.indexBuffer, offset: 0)
   var uniforms = state.transformUniforms(extraTransform * model.transform)
   var lighting = state.lightingUniforms(model)
+  var water = state.waterUniforms(model)
   var texture = state.whiteTexture
   if model.renderOptions.materialID.len > 0 and
       state.materials.hasKey(model.renderOptions.materialID):
@@ -1038,7 +1231,8 @@ proc drawModel(
     texture: texture,
     sampler: state.sampler,
   )
-  if texture.isNil or state.sampler.isNil:
+  if model.renderOptions.effect == StandardEffect and
+      (texture.isNil or state.sampler.isNil):
     raiseGpuError("Missing GPU texture sampler binding")
   pushGPUVertexUniformData(
     commandBuffer, CameraUniformSlot, addr uniforms, sizeof(
@@ -1047,8 +1241,16 @@ proc drawModel(
   pushGPUFragmentUniformData(
     commandBuffer, 0, addr lighting, sizeof(LightingUniforms).uint32
   )
+  if model.renderOptions.effect == WaterEffect:
+    pushGPUVertexUniformData(
+      commandBuffer, 1, addr water, sizeof(WaterUniforms).uint32
+    )
+    pushGPUFragmentUniformData(
+      commandBuffer, 1, addr water, sizeof(WaterUniforms).uint32
+    )
   bindGPUGraphicsPipeline(pass, pipeline)
-  if state.samplerReady and texture != nil:
+  if model.renderOptions.effect == StandardEffect and state.samplerReady and
+      texture != nil:
     bindGpuFragmentSamplers(pass, 0, addr samplerBinding, 1)
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
@@ -1065,7 +1267,8 @@ proc render*(artist: Artist3D, models: openArray[Model],
     if model.renderOptions.materialID.len > 0:
       state[].uploadMaterialTexture(model.renderOptions.materialID)
   if state.device.isNil or state.solidPipeline.isNil or
-      state.wireframePipeline.isNil or state.colorTexture.isNil:
+      state.wireframePipeline.isNil or state.waterPipeline.isNil or
+      state.colorTexture.isNil:
     return
 
   discard flushRenderer(state.renderer)
