@@ -16,6 +16,10 @@ layout(set = 3, binding = 1) uniform Water {
   float uWaveSpeed;
   float uSpecularStrength;
   float uPadding;
+  vec3 uFogNearColor;
+  float uFogDensity;
+  vec3 uFogFarColor;
+  float uFogFalloff;
 };
 
 float hash21(vec2 p) {
@@ -88,5 +92,11 @@ void main() {
   color *= 0.55 + diffuse * 0.45;
   color += vec3(0.70, 0.92, 1.0) * broadSpecular * uSpecularStrength * 0.24;
   color += vec3(0.88, 0.97, 1.0) * (specular + foam * 0.11);
-  outColor = vec4(color, clamp(uOpacity, 0.0, 1.0));
+  float distanceToCamera = length(uCameraPosition - vWorldPosition);
+  float fogAmount = clamp(1.0 - exp(-distanceToCamera * max(uFogDensity, 0.0)), 0.0, 1.0);
+  fogAmount = pow(fogAmount, max(uFogFalloff, 0.001));
+  vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);
+  color = mix(color, fogColor, fogAmount);
+  float alpha = mix(clamp(uOpacity, 0.0, 1.0), 1.0, fogAmount);
+  outColor = vec4(color, alpha);
 }

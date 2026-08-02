@@ -42,12 +42,26 @@ type
     opacity*: float32
     specularStrength*: float32
 
+  FogRenderOptions* = object
+    nearColor*: Vec3
+    farColor*: Vec3
+    density*: float32
+    falloff*: float32
+
+  SkyRenderOptions* = object
+    horizonColor*: Vec3
+    zenithColor*: Vec3
+    groundColor*: Vec3
+    exposure*: float32
+    useSkybox*: bool
+
   RenderOptions* = object
     effect*: RenderEffect
     mode*: MeshRenderMode
     depthWrite*: bool
     baseColor*: Vec3
     materialID*: string
+    fog*: FogRenderOptions
     water*: WaterRenderOptions
 
   Material* = object
@@ -86,6 +100,10 @@ type
     baseColor: Vec3
     useTexture: float32
     splat: Vec4
+    fogNearColor: Vec3
+    fogDensity: float32
+    fogFarColor: Vec3
+    fogFalloff: float32
 
   WaterUniforms = object
     cameraPosition: Vec3
@@ -98,14 +116,30 @@ type
     waveSpeed: float32
     specularStrength: float32
     padding: float32
+    fogNearColor: Vec3
+    fogDensity: float32
+    fogFarColor: Vec3
+    fogFalloff: float32
+
+  SkyUniforms = object
+    inverseViewProjection: Mat4
+    cameraPosition: Vec3
+    exposure: float32
+    horizonColor: Vec3
+    useSkybox: float32
+    zenithColor: Vec3
+    padding0: float32
+    groundColor: Vec3
+    padding1: float32
 
 type
   Artist3DState = object
     renderer: Renderer
     device: GPUDevice
-    solidPipeline, wireframePipeline, waterPipeline: GPUGraphicsPipeline
-    vertexShader, waterVertexShader: GPUShader
-    fragmentShader, waterFragmentShader: GPUShader
+    solidPipeline, wireframePipeline, waterPipeline,
+      skyPipeline: GPUGraphicsPipeline
+    vertexShader, waterVertexShader, skyVertexShader: GPUShader
+    fragmentShader, waterFragmentShader, skyFragmentShader: GPUShader
     meshes: Table[MeshID, Mesh]
     materials: Table[string, GpuMaterial]
     sampler: pointer
@@ -331,11 +365,42 @@ proc init*(
   )
 
 proc init*(
+    T: typedesc[FogRenderOptions],
+    nearColor = vec3(0.72'f32, 0.8'f32, 0.86'f32),
+    farColor = vec3(0.42'f32, 0.56'f32, 0.66'f32),
+    density = 0'f32,
+    falloff = 1'f32,
+): T =
+  T(
+    nearColor: nearColor,
+    farColor: farColor,
+    density: density,
+    falloff: falloff,
+  )
+
+proc init*(
+    T: typedesc[SkyRenderOptions],
+    horizonColor = vec3(0.72'f32, 0.8'f32, 0.86'f32),
+    zenithColor = vec3(0.42'f32, 0.56'f32, 0.66'f32),
+    groundColor = vec3(0.45'f32, 0.5'f32, 0.48'f32),
+    exposure = 1'f32,
+    useSkybox = false,
+): T =
+  T(
+    horizonColor: horizonColor,
+    zenithColor: zenithColor,
+    groundColor: groundColor,
+    exposure: exposure,
+    useSkybox: useSkybox,
+  )
+
+proc init*(
     T: typedesc[RenderOptions],
     mode = SolidMesh,
     depthWrite = true,
     baseColor = vec3(0.9'f32, 0.52'f32, 0.22'f32),
     materialID = "",
+    fog = FogRenderOptions.init(),
 ): T =
   T(
     effect: StandardEffect,
@@ -343,6 +408,7 @@ proc init*(
     depthWrite: depthWrite,
     baseColor: baseColor,
     materialID: materialID,
+    fog: fog,
     water: WaterRenderOptions.init(),
   )
 
@@ -372,6 +438,10 @@ proc transformUniforms(artist: Artist3DState,
 proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
   result.cameraPosition = artist.activeCamera.position
   result.baseColor = model.renderOptions.baseColor
+  result.fogNearColor = model.renderOptions.fog.nearColor
+  result.fogFarColor = model.renderOptions.fog.farColor
+  result.fogDensity = max(model.renderOptions.fog.density, 0'f32)
+  result.fogFalloff = max(model.renderOptions.fog.falloff, 0.001'f32)
   if model.renderOptions.materialID.len > 0 and
       artist.materials.hasKey(model.renderOptions.materialID):
     let material = artist.materials[model.renderOptions.materialID].material
@@ -400,6 +470,19 @@ proc waterUniforms(artist: Artist3DState, model: Model): WaterUniforms =
   result.opacity = clamp(water.opacity, 0'f32, 1'f32)
   result.waveSpeed = water.waveSpeed
   result.specularStrength = max(water.specularStrength, 0'f32)
+  result.fogNearColor = model.renderOptions.fog.nearColor
+  result.fogFarColor = model.renderOptions.fog.farColor
+  result.fogDensity = max(model.renderOptions.fog.density, 0'f32)
+  result.fogFalloff = max(model.renderOptions.fog.falloff, 0.001'f32)
+
+proc skyUniforms(artist: Artist3DState, sky: SkyRenderOptions): SkyUniforms =
+  result.inverseViewProjection = inverse(artist.viewProjection)
+  result.cameraPosition = artist.activeCamera.position
+  result.exposure = max(sky.exposure, 0'f32)
+  result.horizonColor = sky.horizonColor
+  result.zenithColor = sky.zenithColor
+  result.groundColor = sky.groundColor
+  result.useSkybox = if sky.useSkybox: 1'f32 else: 0'f32
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -452,6 +535,9 @@ proc releasePipelines(artist: var Artist3DState) =
   if not artist.waterPipeline.isNil:
     releaseGPUGraphicsPipeline(artist.device, artist.waterPipeline)
     artist.waterPipeline = nil
+  if not artist.skyPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.skyPipeline)
+    artist.skyPipeline = nil
 
 proc createMeshBuffer(
     artist: var Artist3DState, usage: GPUBufferUsageFlags, size: uint32,
@@ -909,6 +995,45 @@ proc createWaterPipeline(artist: var Artist3DState): GPUGraphicsPipeline =
   if result.isNil:
     raiseGpuError("Failed to create GPU water pipeline")
 
+proc createSkyPipeline(artist: var Artist3DState): GPUGraphicsPipeline =
+  var colorTarget = GPUColorTargetDescription(
+    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+    blend_state: GPUColorTargetBlendState(
+      color_write_mask: (
+        GPU_COLORCOMPONENT_R or GPU_COLORCOMPONENT_G or GPU_COLORCOMPONENT_B or
+        GPU_COLORCOMPONENT_A
+    ).GPUColorComponentFlags,
+      enable_color_write_mask: true,
+    ),
+  )
+  var targetInfo = GPUGraphicsPipelineTargetInfo(
+    color_target_descriptions:
+    cast[ptr UncheckedArray[GPUColorTargetDescription]](addr colorTarget),
+    num_color_targets: 1,
+    depth_stencil_format: GPU_TEXTUREFORMAT_D16_UNORM,
+    has_depth_stencil_target: true,
+  )
+  var pipelineInfo = GpuGraphicsPipelineCreateInfo(
+    vertex_shader: artist.skyVertexShader,
+    fragment_shader: artist.skyFragmentShader,
+    primitive_type: GPU_PRIMITIVETYPE_TRIANGLELIST,
+    rasterizer_state: GPURasterizerState(
+      fill_mode: GPU_FILLMODE_FILL,
+      cull_mode: GPU_CULLMODE_NONE,
+      front_face: GPU_FRONTFACE_CLOCKWISE,
+    ),
+    multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    depth_stencil_state: GPUDepthStencilState(
+      compare_op: GPU_COMPAREOP_ALWAYS,
+      enable_depth_test: false,
+      enable_depth_write: false,
+    ),
+    target_info: targetInfo,
+  )
+  result = createGpuGraphicsPipeline(artist.device, addr pipelineInfo)
+  if result.isNil:
+    raiseGpuError("Failed to create GPU sky pipeline")
+
 proc createTrianglePipelines(artist: var Artist3DState) =
   artist.releasePipelines()
   artist.vertexShader =
@@ -921,9 +1046,14 @@ proc createTrianglePipelines(artist: var Artist3DState) =
     createShader(artist.device, "water.vert.spv", GPU_SHADERSTAGE_VERTEX, 2)
   artist.waterFragmentShader =
     createShader(artist.device, "water.frag.spv", GPU_SHADERSTAGE_FRAGMENT, 2)
+  artist.skyVertexShader =
+    createShader(artist.device, "sky.vert.spv", GPU_SHADERSTAGE_VERTEX)
+  artist.skyFragmentShader =
+    createShader(artist.device, "sky.frag.spv", GPU_SHADERSTAGE_FRAGMENT)
   artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true)
   artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, false)
   artist.waterPipeline = artist.createWaterPipeline()
+  artist.skyPipeline = artist.createSkyPipeline()
 
 proc installArtist3DRenderer*(renderer: Renderer) =
   defaultRenderer = renderer
@@ -1256,8 +1386,26 @@ proc drawModel(
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
   drawGPUIndexedPrimitives(pass, mesh.indices.len.uint32, 1, 0, 0, 0)
 
+proc drawSky(
+    state: var Artist3DState,
+    pass: GPURenderPass,
+    commandBuffer: GPUCommandBuffer,
+    sky: SkyRenderOptions,
+) =
+  if state.skyPipeline.isNil:
+    return
+  var uniforms = state.skyUniforms(sky)
+  pushGPUVertexUniformData(
+    commandBuffer, 0, addr uniforms, sizeof(SkyUniforms).uint32
+  )
+  pushGPUFragmentUniformData(
+    commandBuffer, 0, addr uniforms, sizeof(SkyUniforms).uint32
+  )
+  bindGPUGraphicsPipeline(pass, state.skyPipeline)
+  drawGPUPrimitives(pass, 3, 1, 0, 0)
+
 proc render*(artist: Artist3D, models: openArray[Model],
-    transform = identityMat4()) =
+    transform = identityMat4(), sky = SkyRenderOptions.init()) =
   if artist.state.isNil:
     return
   let state = artist.state
@@ -1268,7 +1416,7 @@ proc render*(artist: Artist3D, models: openArray[Model],
       state[].uploadMaterialTexture(model.renderOptions.materialID)
   if state.device.isNil or state.solidPipeline.isNil or
       state.wireframePipeline.isNil or state.waterPipeline.isNil or
-      state.colorTexture.isNil:
+      state.skyPipeline.isNil or state.colorTexture.isNil:
     return
 
   discard flushRenderer(state.renderer)
@@ -1296,6 +1444,7 @@ proc render*(artist: Artist3D, models: openArray[Model],
     discard cancelGPUCommandBuffer(commandBuffer)
     raiseGpuError("Failed to begin GPU render pass")
 
+  state[].drawSky(pass, commandBuffer, sky)
   for model in models:
     state[].drawModel(pass, commandBuffer, model, transform)
   endGPURenderPass(pass)

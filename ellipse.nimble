@@ -23,3 +23,5 @@ task shaders, "Build GLSL shaders":
   exec "glslc -fshader-stage=frag shaders/triangle.frag -o build/shaders/triangle.frag.spv"
   exec "glslc -fshader-stage=vert shaders/water.vert -o build/shaders/water.vert.spv"
   exec "glslc -fshader-stage=frag shaders/water.frag -o build/shaders/water.frag.spv"
+  exec "glslc -fshader-stage=vert shaders/sky.vert -o build/shaders/sky.vert.spv"
+  exec "glslc -fshader-stage=frag shaders/sky.frag -o build/shaders/sky.frag.spv"

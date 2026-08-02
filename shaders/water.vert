@@ -23,6 +23,10 @@ layout(set = 1, binding = 1) uniform Water {
   float uWaveSpeed;
   float uSpecularStrength;
   float uPadding;
+  vec3 uFogNearColor;
+  float uFogDensity;
+  vec3 uFogFarColor;
+  float uFogFalloff;
 };
 
 float hash21(vec2 p) {

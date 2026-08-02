@@ -16,6 +16,10 @@ layout(set = 3, binding = 0) uniform Lighting {
   vec3 uBaseColor;
   float uUseTexture;
   vec4 uSplat;
+  vec3 uFogNearColor;
+  float uFogDensity;
+  vec3 uFogFarColor;
+  float uFogFalloff;
 };
 
 vec3 atlasSample(float tileIndex) {
@@ -52,5 +56,9 @@ void main() {
     ? (uSplat.x > 0.5 ? splatSample() : texture(uTexture, vUv).rgb)
     : uBaseColor;
   vec3 color = baseColor * (0.22 + diffuse * 0.72) + vec3(1.0, 0.9, 0.68) * specular * 0.35;
-  outColor = vec4(color, 1.0);
+  float distanceToCamera = length(uCameraPosition - vWorldPosition);
+  float fogAmount = clamp(1.0 - exp(-distanceToCamera * max(uFogDensity, 0.0)), 0.0, 1.0);
+  fogAmount = pow(fogAmount, max(uFogFalloff, 0.001));
+  vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);
+  outColor = vec4(mix(color, fogColor, fogAmount), 1.0);
 }
