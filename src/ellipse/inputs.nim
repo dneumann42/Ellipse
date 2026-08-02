@@ -146,6 +146,14 @@ proc setSourceDown(inputs: var InputMap, source: InputSource, isDown: bool) =
   inputs.sourceDown[source] = isDown
   inputs.updateActionsForSource(source)
 
+proc maskKeyboardInput*(inputs: var InputMap) =
+  var maskedSources: seq[InputSource]
+  for source, isDown in inputs.sourceDown.pairs:
+    if source.kind == InputKeyboard and isDown:
+      maskedSources.add source
+  for source in maskedSources:
+    inputs.setSourceDown(source, false)
+
 proc handleEvent*(inputs: var InputMap, event: sdl3.Event) =
   let eventType = uint32(event.common.`type`)
   if eventType == uint32(EVENT_KEY_DOWN):

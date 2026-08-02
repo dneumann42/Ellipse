@@ -836,10 +836,21 @@ proc anyBlockedMouseButton(blockedButtons: array[256, bool]): bool =
     if blocked:
       return true
 
+proc nestBlocksKeyboardInputEvent(ui: UI, event: sdl3.Event): bool =
+  let eventType = uint32(event.common.`type`)
+  ui.wantsTextInput() and (
+    eventType == uint32(EVENT_KEY_DOWN) or
+    eventType == uint32(EVENT_KEY_UP) or
+    eventType == uint32(EVENT_TEXT_INPUT) or
+    eventType == uint32(EVENT_TEXT_EDITING)
+  )
+
 proc nestBlocksInputEvent(
     ui: UI, event: sdl3.Event, blockedButtons: var array[256, bool]
 ): bool =
   let eventType = uint32(event.common.`type`)
+  if nestBlocksKeyboardInputEvent(ui, event):
+    return true
   if eventType == uint32(EVENT_MOUSE_BUTTON_DOWN):
     let button = event.button.button.int
     if button >= blockedButtons.low and button <= blockedButtons.high:
@@ -1115,6 +1126,8 @@ template buildApplication*(appConfig: ApplicationConfig) =
       previousTime = frameStart
       let dt {.inject.} = actualFrameDt
       resources.poll()
+      if gui.wantsTextInput():
+        inputs.maskKeyboardInput()
       let benchFrameStart = getPerformanceCounter()
       let benchUpdateStart = benchFrameStart
       update(dt)
@@ -1157,34 +1170,33 @@ template buildApplication*(appConfig: ApplicationConfig) =
         screenshotRequested = false
       attempt renderPresent(app.renderer), "Failed to present renderer"
       let benchFrameEnd = getPerformanceCounter()
-      if benchFrames > 0:
-        if not firstFrame:
-          inc benchFrameCount
-          benchUpdateSeconds += secondsBetween(
-            benchUpdateStart, benchDrawStart, frequency
-          )
-          benchDrawSeconds += secondsBetween(benchDrawStart, benchUiStart, frequency)
-          benchUiSeconds += secondsBetween(benchUiStart, benchPresentStart, frequency)
-          benchPresentSeconds += secondsBetween(
-            benchPresentStart, benchFrameEnd, frequency
-          )
-          benchFrameSeconds += secondsBetween(benchFrameStart, benchFrameEnd, frequency)
-          benchFrameIntervalSeconds += actualFrameDt
-          if benchFrameCount >= benchFrames:
-            let count = benchFrameCount.float64
-            echo "bench frames: ", benchFrameCount
-            echo "bench fps: ", count / benchFrameSeconds
-            echo "bench cadence fps: ", count / benchFrameIntervalSeconds
-            echo "bench fixed update hz: ", 1.0 / FixedUpdateSeconds
-            echo "bench full ui frames: ", benchFullUiFrames
-            echo "bench cached ui frames: ", benchCachedUiFrames
-            echo "bench ui due frames: ", benchUiDueFrames
-            echo "bench nest every frame frames: ", benchNestEveryFrameFrames
-            echo "bench update ms: ", benchUpdateSeconds * 1000 / count
-            echo "bench draw ms: ", benchDrawSeconds * 1000 / count
-            echo "bench ui ms: ", benchUiSeconds * 1000 / count
-            echo "bench present ms: ", benchPresentSeconds * 1000 / count
-            running = false
+      if benchFrames > 0 and not firstFrame:
+        inc benchFrameCount
+        benchUpdateSeconds += secondsBetween(
+          benchUpdateStart, benchDrawStart, frequency
+        )
+        benchDrawSeconds += secondsBetween(benchDrawStart, benchUiStart, frequency)
+        benchUiSeconds += secondsBetween(benchUiStart, benchPresentStart, frequency)
+        benchPresentSeconds += secondsBetween(
+          benchPresentStart, benchFrameEnd, frequency
+        )
+        benchFrameSeconds += secondsBetween(benchFrameStart, benchFrameEnd, frequency)
+        benchFrameIntervalSeconds += actualFrameDt
+        if benchFrameCount >= benchFrames:
+          let count = benchFrameCount.float64
+          echo "bench frames: ", benchFrameCount
+          echo "bench fps: ", count / benchFrameSeconds
+          echo "bench cadence fps: ", count / benchFrameIntervalSeconds
+          echo "bench fixed update hz: ", 1.0 / FixedUpdateSeconds
+          echo "bench full ui frames: ", benchFullUiFrames
+          echo "bench cached ui frames: ", benchCachedUiFrames
+          echo "bench ui due frames: ", benchUiDueFrames
+          echo "bench nest every frame frames: ", benchNestEveryFrameFrames
+          echo "bench update ms: ", benchUpdateSeconds * 1000 / count
+          echo "bench draw ms: ", benchDrawSeconds * 1000 / count
+          echo "bench ui ms: ", benchUiSeconds * 1000 / count
+          echo "bench present ms: ", benchPresentSeconds * 1000 / count
+          running = false
       gui.finishInputFrame()
       inputs.finishFrame()
       firstFrame = false
