@@ -10,6 +10,7 @@ const
   DefaultCameraID* = "default"
   DefaultMeshID* = "default"
 const
+  DefaultSpecularStrength* = 0.35'f32
   CameraUniformSlot = 0'u32
   DefaultFovY = 70'f32
   DefaultNearPlane = 0.1'f32
@@ -47,6 +48,7 @@ type
     farColor*: Vec3
     density*: float32
     falloff*: float32
+    limit*: float32
 
   SkyRenderOptions* = object
     horizonColor*: Vec3
@@ -71,6 +73,7 @@ type
     useTexture*: bool
     textureSampling*: TextureSampling
     atlasColumns*, atlasRows*: int
+    specularStrength*: float32
 
   Model* = object
     meshID*: MeshID
@@ -104,6 +107,9 @@ type
     fogDensity: float32
     fogFarColor: Vec3
     fogFalloff: float32
+    fogLimit: float32
+    specularStrength: float32
+    lightingPadding0: Vec3
 
   WaterUniforms = object
     cameraPosition: Vec3
@@ -120,6 +126,8 @@ type
     fogDensity: float32
     fogFarColor: Vec3
     fogFalloff: float32
+    fogLimit: float32
+    waterPadding0: Vec3
 
   SkyUniforms = object
     inverseViewProjection: Mat4
@@ -370,12 +378,14 @@ proc init*(
     farColor = vec3(0.42'f32, 0.56'f32, 0.66'f32),
     density = 0'f32,
     falloff = 1'f32,
+    limit = 120'f32,
 ): T =
   T(
     nearColor: nearColor,
     farColor: farColor,
     density: density,
     falloff: falloff,
+    limit: limit,
   )
 
 proc init*(
@@ -442,10 +452,13 @@ proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
   result.fogFarColor = model.renderOptions.fog.farColor
   result.fogDensity = max(model.renderOptions.fog.density, 0'f32)
   result.fogFalloff = max(model.renderOptions.fog.falloff, 0.001'f32)
+  result.fogLimit = max(model.renderOptions.fog.limit, 0.001'f32)
+  result.specularStrength = DefaultSpecularStrength
   if model.renderOptions.materialID.len > 0 and
       artist.materials.hasKey(model.renderOptions.materialID):
     let material = artist.materials[model.renderOptions.materialID].material
     result.baseColor = material.baseColor
+    result.specularStrength = max(material.specularStrength, 0'f32)
     result.useTexture =
       if material.useTexture and material.texture != nil and
           material.texture.pixels.len > 0:
@@ -474,6 +487,7 @@ proc waterUniforms(artist: Artist3DState, model: Model): WaterUniforms =
   result.fogFarColor = model.renderOptions.fog.farColor
   result.fogDensity = max(model.renderOptions.fog.density, 0'f32)
   result.fogFalloff = max(model.renderOptions.fog.falloff, 0.001'f32)
+  result.fogLimit = max(model.renderOptions.fog.limit, 0.001'f32)
 
 proc skyUniforms(artist: Artist3DState, sky: SkyRenderOptions): SkyUniforms =
   result.inverseViewProjection = inverse(artist.viewProjection)

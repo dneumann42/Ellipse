@@ -27,6 +27,8 @@ layout(set = 1, binding = 1) uniform Water {
   float uFogDensity;
   vec3 uFogFarColor;
   float uFogFalloff;
+  float uFogLimit;
+  vec3 uWaterPadding0;
 };
 
 float hash21(vec2 p) {

@@ -20,7 +20,17 @@ layout(set = 3, binding = 1) uniform Water {
   float uFogDensity;
   vec3 uFogFarColor;
   float uFogFalloff;
+  float uFogLimit;
+  vec3 uWaterPadding0;
 };
+
+float fogAmountForDistance(float distanceToCamera) {
+  float limit = max(uFogLimit, 0.001);
+  float softFog = clamp(1.0 - exp(-distanceToCamera * max(uFogDensity, 0.0)), 0.0, 1.0);
+  softFog = pow(softFog, max(uFogFalloff, 0.001));
+  float cutoffFog = smoothstep(limit * 0.82, limit, distanceToCamera);
+  return max(softFog, cutoffFog);
+}
 
 float hash21(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -93,8 +103,7 @@ void main() {
   color += vec3(0.70, 0.92, 1.0) * broadSpecular * uSpecularStrength * 0.24;
   color += vec3(0.88, 0.97, 1.0) * (specular + foam * 0.11);
   float distanceToCamera = length(uCameraPosition - vWorldPosition);
-  float fogAmount = clamp(1.0 - exp(-distanceToCamera * max(uFogDensity, 0.0)), 0.0, 1.0);
-  fogAmount = pow(fogAmount, max(uFogFalloff, 0.001));
+  float fogAmount = fogAmountForDistance(distanceToCamera);
   vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);
   color = mix(color, fogColor, fogAmount);
   float alpha = mix(clamp(uOpacity, 0.0, 1.0), 1.0, fogAmount);

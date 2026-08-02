@@ -20,7 +20,18 @@ layout(set = 3, binding = 0) uniform Lighting {
   float uFogDensity;
   vec3 uFogFarColor;
   float uFogFalloff;
+  float uFogLimit;
+  float uSpecularStrength;
+  vec3 uLightingPadding0;
 };
+
+float fogAmountForDistance(float distanceToCamera) {
+  float limit = max(uFogLimit, 0.001);
+  float softFog = clamp(1.0 - exp(-distanceToCamera * max(uFogDensity, 0.0)), 0.0, 1.0);
+  softFog = pow(softFog, max(uFogFalloff, 0.001));
+  float cutoffFog = smoothstep(limit * 0.82, limit, distanceToCamera);
+  return max(softFog, cutoffFog);
+}
 
 vec3 atlasSample(float tileIndex) {
   float columns = max(uSplat.y, 1.0);
@@ -55,10 +66,9 @@ void main() {
   vec3 baseColor = uUseTexture > 0.5
     ? (uSplat.x > 0.5 ? splatSample() : texture(uTexture, vUv).rgb)
     : uBaseColor;
-  vec3 color = baseColor * (0.22 + diffuse * 0.72) + vec3(1.0, 0.9, 0.68) * specular * 0.35;
+  vec3 color = baseColor * (0.22 + diffuse * 0.72) + vec3(1.0, 0.9, 0.68) * specular * max(uSpecularStrength, 0.0);
   float distanceToCamera = length(uCameraPosition - vWorldPosition);
-  float fogAmount = clamp(1.0 - exp(-distanceToCamera * max(uFogDensity, 0.0)), 0.0, 1.0);
-  fogAmount = pow(fogAmount, max(uFogFalloff, 0.001));
+  float fogAmount = fogAmountForDistance(distanceToCamera);
   vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);
   outColor = vec4(mix(color, fogColor, fogAmount), 1.0);
 }
