@@ -54,6 +54,7 @@ type
     horizonColor*: Vec3
     zenithColor*: Vec3
     groundColor*: Vec3
+    skybox*: TextureResourceHandle
     exposure*: float32
     useSkybox*: bool
 
@@ -90,6 +91,12 @@ type
 
   GpuMaterial = object
     material: Material
+    texture: GPUTexture
+    textureWidth, textureHeight: uint32
+    textureDirty: bool
+
+  GpuSkybox = object
+    source: TextureResourceHandle
     texture: GPUTexture
     textureWidth, textureHeight: uint32
     textureDirty: bool
@@ -131,15 +138,11 @@ type
     waterPadding0: Vec3
 
   SkyUniforms = object
-    inverseViewProjection: Mat4
-    cameraPosition: Vec3
-    exposure: float32
-    horizonColor: Vec3
-    useSkybox: float32
-    zenithColor: Vec3
-    padding0: float32
-    groundColor: Vec3
-    padding1: float32
+    cameraRotation: Mat4
+    viewportScale: Vec4
+    horizonExposure: Vec4
+    zenithUseSkybox: Vec4
+    groundColor: Vec4
 
 type
   Artist3DState = object
@@ -155,6 +158,8 @@ type
     samplerReady: bool
     textureFiltering*: bool
     whiteTexture: GPUTexture
+    whiteCubeTexture: GPUTexture
+    skybox: GpuSkybox
     defaultModel: Model
     colorTexture, depthTexture: GPUTexture
     renderTexture: Texture
@@ -395,6 +400,7 @@ proc init*(
     horizonColor = vec3(0.72'f32, 0.8'f32, 0.86'f32),
     zenithColor = vec3(0.42'f32, 0.56'f32, 0.66'f32),
     groundColor = vec3(0.45'f32, 0.5'f32, 0.48'f32),
+    skybox: TextureResourceHandle = nil,
     exposure = 1'f32,
     useSkybox = false,
 ): T =
@@ -402,8 +408,9 @@ proc init*(
     horizonColor: horizonColor,
     zenithColor: zenithColor,
     groundColor: groundColor,
+    skybox: skybox,
     exposure: exposure,
-    useSkybox: useSkybox,
+    useSkybox: useSkybox and skybox != nil,
   )
 
 proc init*(
@@ -443,6 +450,15 @@ proc viewProjection(artist: Artist3DState): Mat4 =
   let projection =
     forwardPerspective(DefaultFovY, aspect, DefaultNearPlane, DefaultFarPlane)
   projection * artist.activeCamera.viewMatrix
+
+proc skyViewportScale(artist: Artist3DState): Vec4 =
+  let aspect =
+    if artist.textureHeight == 0:
+      1'f32
+    else:
+      artist.textureWidth.float32 / artist.textureHeight.float32
+  let tanHalfFov = tan(DefaultFovY * PI.float32 / 360'f32)
+  vec4(tanHalfFov * aspect, tanHalfFov, 0, 0)
 
 proc transformUniforms(artist: Artist3DState,
     modelTransform: Mat4): TransformUniforms =
@@ -494,13 +510,18 @@ proc waterUniforms(artist: Artist3DState, model: Model): WaterUniforms =
   result.fogLimit = max(model.renderOptions.fog.limit, 0.001'f32)
 
 proc skyUniforms(artist: Artist3DState, sky: SkyRenderOptions): SkyUniforms =
-  result.inverseViewProjection = inverse(artist.viewProjection)
-  result.cameraPosition = artist.activeCamera.position
-  result.exposure = max(sky.exposure, 0'f32)
-  result.horizonColor = sky.horizonColor
-  result.zenithColor = sky.zenithColor
-  result.groundColor = sky.groundColor
-  result.useSkybox = if sky.useSkybox: 1'f32 else: 0'f32
+  result.cameraRotation = mat4(normalize(artist.activeCamera.orientation))
+  result.viewportScale = artist.skyViewportScale()
+  result.horizonExposure = vec4(
+    sky.horizonColor.x, sky.horizonColor.y, sky.horizonColor.z,
+    max(sky.exposure, 0'f32),
+  )
+  result.zenithUseSkybox = vec4(
+    sky.zenithColor.x, sky.zenithColor.y, sky.zenithColor.z,
+    if sky.useSkybox and sky.skybox != nil: 1'f32 else: 0'f32,
+  )
+  result.groundColor = vec4(sky.groundColor.x, sky.groundColor.y,
+      sky.groundColor.z, 0)
 
 proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
@@ -538,6 +559,13 @@ proc releaseMaterials(artist: var Artist3DState) =
   if artist.whiteTexture != nil:
     releaseGPUTexture(artist.device, artist.whiteTexture)
     artist.whiteTexture = nil
+  if artist.whiteCubeTexture != nil:
+    releaseGPUTexture(artist.device, artist.whiteCubeTexture)
+    artist.whiteCubeTexture = nil
+  if artist.skybox.texture != nil:
+    releaseGPUTexture(artist.device, artist.skybox.texture)
+    artist.skybox.texture = nil
+  artist.skybox = GpuSkybox()
   if artist.samplerReady:
     releaseGpuSampler(artist.device, artist.sampler)
     artist.sampler = nil
@@ -653,6 +681,23 @@ proc createSampledTexture(
   if result.isNil:
     raiseGpuError(context)
 
+proc createSampledCubeTexture(
+    artist: var Artist3DState, size: uint32, context: string
+): GPUTexture =
+  var textureInfo = GPUTextureCreateInfo(
+    `type`: GPU_TEXTURETYPE_CUBE,
+    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+    usage: GPU_TEXTUREUSAGE_SAMPLER.GPUTextureUsageFlags,
+    width: size,
+    height: size,
+    layer_count_or_depth: 6,
+    num_levels: 1,
+    sample_count: GPU_SAMPLECOUNT_1,
+  )
+  result = createGPUTexture(artist.device, addr textureInfo)
+  if result.isNil:
+    raiseGpuError(context)
+
 proc uploadBytesToGpuTexture(
     artist: var Artist3DState,
     commandBuffer: GPUCommandBuffer,
@@ -660,6 +705,8 @@ proc uploadBytesToGpuTexture(
     sourceBytes: pointer,
     width, height: uint32,
     context: string,
+    layer = 0'u32,
+    cycle = true,
 ): GPUTransferBuffer =
   let bufferSize = width * height * 4
   if bufferSize == 0:
@@ -693,7 +740,7 @@ proc uploadBytesToGpuTexture(
   var destination = GpuTextureRegion(
     texture: texture,
     mip_level: 0,
-    layer: 0,
+    layer: layer,
     x: 0,
     y: 0,
     z: 0,
@@ -701,7 +748,7 @@ proc uploadBytesToGpuTexture(
     h: height,
     d: 1,
   )
-  uploadToGpuTexture(copyPass, addr source, addr destination, true)
+  uploadToGpuTexture(copyPass, addr source, addr destination, cycle)
   endGPUCopyPass(copyPass)
   transferBuffer
 
@@ -711,6 +758,8 @@ proc uploadTexturePixels(
     pixels: var seq[uint8],
     width, height: uint32,
     context: string,
+    layer = 0'u32,
+    cycle = true,
 ) =
   if texture == nil or pixels.len == 0:
     return
@@ -724,6 +773,8 @@ proc uploadTexturePixels(
     width,
     height,
     context,
+    layer,
+    cycle,
   )
   defer:
     if transferBuffer != nil:
@@ -765,6 +816,18 @@ proc ensureWhiteTexture(artist: var Artist3DState) =
   var pixels = @[255'u8, 255, 255, 255]
   artist.uploadTexturePixels(artist.whiteTexture, pixels, 1, 1, "default texture")
 
+proc ensureWhiteCubeTexture(artist: var Artist3DState) =
+  if artist.device.isNil or artist.whiteCubeTexture != nil:
+    return
+  artist.whiteCubeTexture = artist.createSampledCubeTexture(1,
+      "Failed to create default skybox texture")
+  for layer in 0'u32 .. 5'u32:
+    var pixels = @[255'u8, 255, 255, 255]
+    artist.uploadTexturePixels(
+      artist.whiteCubeTexture, pixels, 1, 1, "default skybox texture", layer,
+      layer == 0'u32
+    )
+
 proc uploadMaterialTexture(artist: var Artist3DState, materialID: string) =
   if artist.device.isNil or not artist.materials.hasKey(materialID):
     return
@@ -801,6 +864,64 @@ proc uploadMaterialTexture(artist: var Artist3DState, materialID: string) =
   gpuMaterial.textureWidth = texture.width.uint32
   gpuMaterial.textureHeight = texture.height.uint32
   gpuMaterial.textureDirty = false
+
+proc uploadSkyboxTexture(artist: var Artist3DState,
+    source: TextureResourceHandle) =
+  if artist.device.isNil:
+    return
+  if artist.skybox.source != source:
+    if artist.skybox.texture != nil:
+      releaseGPUTexture(artist.device, artist.skybox.texture)
+    artist.skybox = GpuSkybox(source: source, textureDirty: true)
+  if not artist.skybox.textureDirty:
+    return
+  if source == nil or source.pixels.len == 0 or source.width <= 0 or
+      source.height <= 0:
+    artist.skybox.textureDirty = false
+    return
+
+  let faceSize = min(source.width div 4, source.height div 3)
+  if faceSize <= 0:
+    artist.skybox.textureDirty = false
+    return
+
+  artist.skybox.texture = artist.createSampledCubeTexture(
+    faceSize.uint32,
+    "Failed to create skybox texture",
+  )
+  let cells = [
+    (x: 2, y: 1), # +X
+    (x: 0, y: 1), # -X
+    (x: 1, y: 0), # +Y
+    (x: 1, y: 2), # -Y
+    (x: 1, y: 1), # +Z
+    (x: 3, y: 1), # -Z
+  ]
+  for layer, cell in cells:
+    var pixels = newSeq[uint8](faceSize * faceSize * 4)
+    for y in 0 ..< faceSize:
+      for x in 0 ..< faceSize:
+        let
+          sourceX = cell.x * faceSize + x
+          sourceY = cell.y * faceSize + y
+          sourceIndex = (sourceY * source.width + sourceX) * 4
+          destinationIndex = (y * faceSize + x) * 4
+        pixels[destinationIndex + 0] = source.pixels[sourceIndex + 0]
+        pixels[destinationIndex + 1] = source.pixels[sourceIndex + 1]
+        pixels[destinationIndex + 2] = source.pixels[sourceIndex + 2]
+        pixels[destinationIndex + 3] = source.pixels[sourceIndex + 3]
+    artist.uploadTexturePixels(
+      artist.skybox.texture,
+      pixels,
+      faceSize.uint32,
+      faceSize.uint32,
+      "skybox texture",
+      layer.uint32,
+      layer == 0,
+    )
+  artist.skybox.textureWidth = faceSize.uint32
+  artist.skybox.textureHeight = faceSize.uint32
+  artist.skybox.textureDirty = false
 
 proc uploadMesh(artist: var Artist3DState, meshID: MeshID) =
   if artist.device.isNil:
@@ -1083,7 +1204,8 @@ proc createTrianglePipelines(artist: var Artist3DState) =
   artist.skyVertexShader =
     createShader(artist.device, "sky.vert.spv", GPU_SHADERSTAGE_VERTEX)
   artist.skyFragmentShader =
-    createShader(artist.device, "sky.frag.spv", GPU_SHADERSTAGE_FRAGMENT)
+    createShader(artist.device, "sky.frag.spv", GPU_SHADERSTAGE_FRAGMENT,
+        samplers = 1)
   artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true, true)
   artist.overlayPipeline = artist.createTrianglePipeline(SolidMesh, false, false)
   artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, true, false)
@@ -1105,6 +1227,7 @@ proc initWithRenderer(artist: var Artist3DState, renderer: Renderer) =
     raiseGpuError("SDL renderer is not the GPU renderer")
   artist.ensureSampler()
   artist.ensureWhiteTexture()
+  artist.ensureWhiteCubeTexture()
   artist.createTrianglePipelines()
   for meshID in artist.meshes.keys:
     artist.uploadMesh(meshID)
@@ -1455,6 +1578,15 @@ proc drawSky(
   if state.skyPipeline.isNil:
     return
   var uniforms = state.skyUniforms(sky)
+  let texture =
+    if sky.useSkybox and state.skybox.texture != nil:
+      state.skybox.texture
+    else:
+      state.whiteCubeTexture
+  var samplerBinding = GpuTextureSamplerBinding(
+    texture: texture,
+    sampler: state.sampler,
+  )
   pushGPUVertexUniformData(
     commandBuffer, 0, addr uniforms, sizeof(SkyUniforms).uint32
   )
@@ -1462,6 +1594,8 @@ proc drawSky(
     commandBuffer, 0, addr uniforms, sizeof(SkyUniforms).uint32
   )
   bindGPUGraphicsPipeline(pass, state.skyPipeline)
+  if state.samplerReady and texture != nil:
+    bindGpuFragmentSamplers(pass, 0, addr samplerBinding, 1)
   drawGPUPrimitives(pass, 3, 1, 0, 0)
 
 proc render*(artist: Artist3D, models: openArray[Model],
@@ -1474,6 +1608,8 @@ proc render*(artist: Artist3D, models: openArray[Model],
     state[].uploadMesh(model.meshID)
     if model.renderOptions.materialID.len > 0:
       state[].uploadMaterialTexture(model.renderOptions.materialID)
+  if sky.useSkybox and sky.skybox != nil:
+    state[].uploadSkyboxTexture(sky.skybox)
   if state.device.isNil or state.solidPipeline.isNil or
       state.overlayPipeline.isNil or state.wireframePipeline.isNil or
       state.overlayWireframePipeline.isNil or state.waterPipeline.isNil or

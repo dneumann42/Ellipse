@@ -13,6 +13,7 @@ requires "nim >= 2.2.10"
 
 requires "vmath >= 3.0.0"
 requires "chroma >= 1.0.0"
+requires "zlib >= 0.1.0"
 requires "https://github.com/nim-lang/sdl3"
 requires "plugnim"
 requires "nest"

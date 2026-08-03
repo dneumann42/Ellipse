@@ -4,17 +4,21 @@ layout(location = 0) in vec3 vViewDirection;
 
 layout(location = 0) out vec4 outColor;
 
+layout(set = 2, binding = 0) uniform samplerCube uSkybox;
+
 layout(set = 3, binding = 0) uniform Sky {
-  mat4 uInverseViewProjection;
-  vec3 uCameraPosition;
-  float uExposure;
-  vec3 uHorizonColor;
-  float uUseSkybox;
-  vec3 uZenithColor;
-  float uPadding0;
-  vec3 uGroundColor;
-  float uPadding1;
+  mat4 uCameraRotation;
+  vec4 uViewportScale;
+  vec4 uHorizonExposure;
+  vec4 uZenithUseSkybox;
+  vec4 uGroundColorValue;
 };
+
+#define uHorizonColor uHorizonExposure.rgb
+#define uExposure uHorizonExposure.a
+#define uZenithColor uZenithUseSkybox.rgb
+#define uUseSkybox uZenithUseSkybox.a
+#define uGroundColor uGroundColorValue.rgb
 
 vec3 proceduralSky(vec3 direction) {
   float up = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
@@ -26,9 +30,10 @@ vec3 proceduralSky(vec3 direction) {
 }
 
 vec3 skyboxSky(vec3 direction) {
-  // Placeholder for future cubemap sampling. The direction and uniform path are
-  // already present so adding a sampler does not require changing scene code.
-  return proceduralSky(direction);
+  vec3 color = texture(uSkybox, direction).rgb;
+  float horizonBlend = pow(clamp(1.0 - abs(direction.y), 0.0, 1.0), 3.0) * 0.55;
+  float lowerBlend = smoothstep(-0.45, 0.05, -direction.y) * 0.35;
+  return mix(color, uHorizonColor, max(horizonBlend, lowerBlend));
 }
 
 void main() {

@@ -3,6 +3,7 @@ import std/[hashes, os, tables]
 import sdl3
 import sdl3_ttf
 
+import aseprite
 import errors
 
 type
@@ -261,6 +262,32 @@ proc loadImageTexture(manager: ResourceManager, id: ResourceId,
     pixels: converted.copySurfacePixels(),
   )
 
+proc loadAsepriteTexture(manager: ResourceManager, id: ResourceId,
+    path: string): TextureResourceHandle =
+  let sprite = loadAseprite(path)
+  let pixels = sprite.renderFrameRgba()
+  let surface = createSurfaceFrom(
+    sprite.width.cint,
+    sprite.height.cint,
+    PIXELFORMAT_RGBA32,
+    unsafeAddr pixels[0],
+    (sprite.width.int * 4).cint,
+  )
+  if surface == nil:
+    raiseResourceError("Failed to create Aseprite surface " & path)
+  defer:
+    destroySurface(surface)
+  let texture = manager.textureFromSurface(path, surface)
+  TextureResourceHandle(
+    id: id,
+    path: path,
+    state: ResourceReady,
+    texture: texture,
+    width: sprite.width.int,
+    height: sprite.height.int,
+    pixels: pixels,
+  )
+
 proc loadAudioFromBytes(id: ResourceId, path: string, data: pointer,
     len: csize_t): AudioResourceHandle =
   let io = ioFromBytes(data, len)
@@ -290,6 +317,11 @@ proc addFont*(manager: var ResourceManager, id: ResourceId, path: string,
 
 proc addTexture*(manager: var ResourceManager, id: ResourceId,
     path: string): TextureResourceHandle =
+  if path.splitFile.ext == ".aseprite":
+    result = manager.loadAsepriteTexture(id, path)
+    manager.clear(id)
+    manager.resources[id] = result
+    return
   if path.splitFile.ext != ".bmp":
     result = manager.loadImageTexture(id, path)
     manager.clear(id)
@@ -372,12 +404,15 @@ proc finishAsync(manager: var ResourceManager, resource: Resource,
           FontResourceHandle(resource).size,
         )
       elif resource of TextureResourceHandle:
-        manager.loadTextureFromBytes(
-          resource.id,
-          resource.path,
-          outcome.buffer,
-          outcome.bytesTransferred.csize_t,
-        )
+        if resource.path.splitFile.ext == ".aseprite":
+          manager.loadAsepriteTexture(resource.id, resource.path)
+        else:
+          manager.loadTextureFromBytes(
+            resource.id,
+            resource.path,
+            outcome.buffer,
+            outcome.bytesTransferred.csize_t,
+          )
       else:
         loadAudioFromBytes(
           resource.id,

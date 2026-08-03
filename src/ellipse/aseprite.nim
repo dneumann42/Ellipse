@@ -2,10 +2,7 @@
 
 import std/[algorithm, math, os, strformat, strutils]
 
-import zlib
-
-import ./platform/SDL3gpuext
-import ./rendering/[artist2D, artist3D]
+import zlib/zlib_api
 
 type
   AsepriteError* = object of CatchableError
@@ -680,13 +677,3 @@ proc renderFrameRgba*(sprite: AsepriteFile; frameIndex = 0): seq[uint8] {.gcsafe
         let src = sprite.pixelRgba(cel.pixels, cy * int(cel.width) + cx, layer)
         let dstOffset = (dy * int(sprite.width) + dx) * 4
         blendOver(result, dstOffset, src, opacity)
-
-proc createAsepriteTexture3D*(
-  artist3D: var Artist3D;
-  path: string;
-  frameIndex = 0;
-  filterMode: TextureFilterMode = Nearest
-): GPUTextureHandle {.gcsafe.} =
-  let sprite = loadAseprite(path)
-  let pixels = sprite.renderFrameRgba(frameIndex)
-  createTexture3D(artist3D, int(sprite.width), int(sprite.height), pixels, filterMode)

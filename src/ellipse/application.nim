@@ -10,6 +10,7 @@ export nest except Event, update, draw
 
 import rendering/artist3D
 
+import aseprite
 import errors, scenes
 import inputs as ellipseInputs
 import resources as ellipseResources
@@ -27,6 +28,10 @@ type
   NestTextSlot = object
     texture: Texture
     extent: screen.TextExtent
+
+  NestClipState = object
+    enabled: bool
+    rect: sdl3.Rect
 
   NestDynamicText* = object
     text*: string
@@ -65,6 +70,8 @@ var
   nestCachedTexture: Texture
   nestCachedTextureWidth: int
   nestCachedTextureHeight: int
+  nestClipStack: seq[NestClipState]
+  nestCurrentClip: NestClipState
   nestDynamicTexts: Table[WidgetID, NestDynamicText]
   hasApplicationRedraw: bool
   applicationRedrawCounter: uint64
@@ -117,6 +124,8 @@ proc `=destroy`*(app: var Application) =
     nestRenderer = nil
   if nestWindow == app.window:
     nestWindow = nil
+  nestClipStack.setLen(0)
+  nestCurrentClip = NestClipState()
 
 proc raiseError(context: string) {.noreturn.} =
   raise SDLException.newException(context & ": " & $sdl3.getError())
@@ -671,7 +680,20 @@ proc nestLoadImage(path: string): screen.Image {.nimcall.} =
   if nestImageByPath.hasKey(path):
     return nestImageByPath[path]
 
-  let surface = imgLoad(cstring(path))
+  var asepritePixels: seq[uint8]
+  let surface =
+    if path.splitFile.ext == ".aseprite":
+      let sprite = loadAseprite(path)
+      asepritePixels = sprite.renderFrameRgba()
+      createSurfaceFrom(
+        sprite.width.cint,
+        sprite.height.cint,
+        PIXELFORMAT_RGBA32,
+        unsafeAddr asepritePixels[0],
+        (sprite.width.int * 4).cint,
+      )
+    else:
+      imgLoad(cstring(path))
   if surface == nil:
     debugEcho "Nest image load failed: ", path
     return screen.Image(0)
@@ -726,15 +748,34 @@ proc nestMeasureImage(path: string): screen.TextExtent {.nimcall.} =
     return screen.TextExtent()
   nestImageSize(image)
 
-proc nestSetClipRect(r: coords.Rect) {.nimcall.} =
+proc applyNestClipState() =
   if nestRenderer == nil:
     return
-  var rect = sdl3.Rect(x: r.x.cint, y: r.y.cint, w: r.w.cint, h: r.h.cint)
-  discard setRenderClipRect(nestRenderer, addr rect)
+  if nestCurrentClip.enabled:
+    discard setRenderClipRect(nestRenderer, addr nestCurrentClip.rect)
+  else:
+    discard setRenderClipRect(nestRenderer, nil)
 
 proc nestClearClipRect() {.nimcall.} =
-  if nestRenderer != nil:
-    discard setRenderClipRect(nestRenderer, nil)
+  nestCurrentClip = NestClipState()
+  applyNestClipState()
+
+proc nestSaveState() {.nimcall.} =
+  nestClipStack.add nestCurrentClip
+
+proc nestRestoreState() {.nimcall.} =
+  if nestClipStack.len == 0:
+    return
+  nestCurrentClip = nestClipStack[^1]
+  nestClipStack.setLen(nestClipStack.len - 1)
+  applyNestClipState()
+
+proc nestSetClipRect(r: coords.Rect) {.nimcall.} =
+  nestCurrentClip = NestClipState(
+    enabled: true,
+    rect: sdl3.Rect(x: r.x.cint, y: r.y.cint, w: r.w.cint, h: r.h.cint),
+  )
+  applyNestClipState()
 
 proc nestSetWindowTitle(title: string) {.nimcall.} =
   if nestWindow != nil:
@@ -743,6 +784,9 @@ proc nestSetWindowTitle(title: string) {.nimcall.} =
 proc installNestDriver*(app: Application) =
   nestWindow = app.window
   nestRenderer = app.renderer
+  nestClipStack.setLen(0)
+  nestCurrentClip = NestClipState()
+  applyNestClipState()
   input.inputRelays.getTicks = proc(): int =
     sdl3.getTicks().int
   input.inputRelays.sleep = proc(ms: int) =
@@ -752,10 +796,8 @@ proc installNestDriver*(app: Application) =
     discard,
     refresh: proc() =
     discard,
-    saveState: proc() =
-    discard,
-    restoreState: proc() =
-    nestClearClipRect(),
+    saveState: nestSaveState,
+    restoreState: nestRestoreState,
     setClipRect: nestSetClipRect,
     setCursor: proc(c: CursorKind) =
     discard,
@@ -874,12 +916,14 @@ proc nestBlocksInputEvent(
         event.wheel.mouse_y.int)
 
 proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
+  nestClipStack.setLen(0)
+  nestClearClipRect()
   for command in commands:
     case command.kind
     of SaveState:
-      discard
+      nestSaveState()
     of RestoreState:
-      nestClearClipRect()
+      nestRestoreState()
     of SetClipRect:
       nestSetClipRect(command.rect)
     of FillRect:
@@ -907,6 +951,8 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
           nestDrawImage(image, command.src, command.dst)
       else:
         nestDrawImage(command.image, command.src, command.dst)
+  nestClipStack.setLen(0)
+  nestClearClipRect()
 
 template renderNest*(ui: var UI, body: untyped) =
   ui.setDrawTicks(sdl3.getTicks().int)
