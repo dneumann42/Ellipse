@@ -820,6 +820,8 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event): bool =
     ui.requestRedrawAfter(0)
     return true
   elif eventType == uint32(EVENT_KEY_DOWN):
+    if event.key.repeat:
+      return false
     var key = translateNestScancode(event.key.scancode)
     if key == KeyNone:
       key = translateNestKeycode(event.key.key.int32)
@@ -968,7 +970,7 @@ proc renderNestDynamicTexts(ui: UI) =
       item.bg,
     )
 
-template buildApplication*(appConfig: ApplicationConfig) =
+template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
   generatePluginContext()
   loadDynamicPlugins()
   proc start() =
@@ -1008,6 +1010,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
     var
       sceneStack {.inject.} = SceneStack.init()
 
+    blk
     generatePluginFunctionCalls(load)
 
     let frequency = getPerformanceFrequency()

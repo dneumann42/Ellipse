@@ -60,6 +60,7 @@ type
   RenderOptions* = object
     effect*: RenderEffect
     mode*: MeshRenderMode
+    depthTest*: bool
     depthWrite*: bool
     baseColor*: Vec3
     materialID*: string
@@ -144,8 +145,8 @@ type
   Artist3DState = object
     renderer: Renderer
     device: GPUDevice
-    solidPipeline, wireframePipeline, waterPipeline,
-      skyPipeline: GPUGraphicsPipeline
+    solidPipeline, overlayPipeline, wireframePipeline, overlayWireframePipeline,
+      waterPipeline, skyPipeline: GPUGraphicsPipeline
     vertexShader, waterVertexShader, skyVertexShader: GPUShader
     fragmentShader, waterFragmentShader, skyFragmentShader: GPUShader
     meshes: Table[MeshID, Mesh]
@@ -408,6 +409,7 @@ proc init*(
 proc init*(
     T: typedesc[RenderOptions],
     mode = SolidMesh,
+    depthTest = true,
     depthWrite = true,
     baseColor = vec3(0.9'f32, 0.52'f32, 0.22'f32),
     materialID = "",
@@ -416,6 +418,7 @@ proc init*(
   T(
     effect: StandardEffect,
     mode: mode,
+    depthTest: depthTest,
     depthWrite: depthWrite,
     baseColor: baseColor,
     materialID: materialID,
@@ -544,9 +547,15 @@ proc releasePipelines(artist: var Artist3DState) =
   if not artist.solidPipeline.isNil:
     releaseGPUGraphicsPipeline(artist.device, artist.solidPipeline)
     artist.solidPipeline = nil
+  if not artist.overlayPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.overlayPipeline)
+    artist.overlayPipeline = nil
   if not artist.wireframePipeline.isNil:
     releaseGPUGraphicsPipeline(artist.device, artist.wireframePipeline)
     artist.wireframePipeline = nil
+  if not artist.overlayWireframePipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.overlayWireframePipeline)
+    artist.overlayWireframePipeline = nil
   if not artist.waterPipeline.isNil:
     releaseGPUGraphicsPipeline(artist.device, artist.waterPipeline)
     artist.waterPipeline = nil
@@ -848,7 +857,7 @@ proc uploadMesh(artist: var Artist3DState, meshID: MeshID) =
   mesh.indicesDirty = false
 
 proc createTrianglePipeline(
-    artist: var Artist3DState, mode: MeshRenderMode, depthWrite: bool
+    artist: var Artist3DState, mode: MeshRenderMode, depthTest, depthWrite: bool
 ): GPUGraphicsPipeline =
   var vertexBuffers = [
     GPUVertexBufferDescription(
@@ -931,7 +940,7 @@ proc createTrianglePipeline(
     multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
     depth_stencil_state: GPUDepthStencilState(
       compare_op: GPU_COMPAREOP_LESS_OR_EQUAL,
-      enable_depth_test: true,
+      enable_depth_test: depthTest,
       enable_depth_write: depthWrite,
     ),
     target_info: targetInfo,
@@ -1075,8 +1084,12 @@ proc createTrianglePipelines(artist: var Artist3DState) =
     createShader(artist.device, "sky.vert.spv", GPU_SHADERSTAGE_VERTEX)
   artist.skyFragmentShader =
     createShader(artist.device, "sky.frag.spv", GPU_SHADERSTAGE_FRAGMENT)
-  artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true)
-  artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, false)
+  artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true, true)
+  artist.overlayPipeline = artist.createTrianglePipeline(SolidMesh, false, false)
+  artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, true, false)
+  artist.overlayWireframePipeline = artist.createTrianglePipeline(
+    WireframeMesh, false, false
+  )
   artist.waterPipeline = artist.createWaterPipeline()
   artist.skyPipeline = artist.createSkyPipeline()
 
@@ -1382,9 +1395,14 @@ proc drawModel(
     of WaterEffect:
       state.waterPipeline
     of StandardEffect:
-      case model.renderOptions.mode
-      of SolidMesh: state.solidPipeline
-      of WireframeMesh: state.wireframePipeline
+      if not model.renderOptions.depthTest:
+        case model.renderOptions.mode
+        of SolidMesh: state.overlayPipeline
+        of WireframeMesh: state.overlayWireframePipeline
+      else:
+        case model.renderOptions.mode
+        of SolidMesh: state.solidPipeline
+        of WireframeMesh: state.wireframePipeline
   if pipeline.isNil:
     return
 
@@ -1457,7 +1475,8 @@ proc render*(artist: Artist3D, models: openArray[Model],
     if model.renderOptions.materialID.len > 0:
       state[].uploadMaterialTexture(model.renderOptions.materialID)
   if state.device.isNil or state.solidPipeline.isNil or
-      state.wireframePipeline.isNil or state.waterPipeline.isNil or
+      state.overlayPipeline.isNil or state.wireframePipeline.isNil or
+      state.overlayWireframePipeline.isNil or state.waterPipeline.isNil or
       state.skyPipeline.isNil or state.colorTexture.isNil:
     return
 
@@ -1488,7 +1507,11 @@ proc render*(artist: Artist3D, models: openArray[Model],
 
   state[].drawSky(pass, commandBuffer, sky)
   for model in models:
-    state[].drawModel(pass, commandBuffer, model, transform)
+    if model.renderOptions.depthTest:
+      state[].drawModel(pass, commandBuffer, model, transform)
+  for model in models:
+    if not model.renderOptions.depthTest:
+      state[].drawModel(pass, commandBuffer, model, transform)
   endGPURenderPass(pass)
 
   if not submitGPUCommandBuffer(commandBuffer):
