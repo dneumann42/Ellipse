@@ -1,16 +1,16 @@
 import std/[os, osproc, streams, strutils, tables]
 
-import sdl3
-import sdl3_ttf
+import sdl3, sdl3_ttf, plugnim
 import chroma as chromaColors
-import plugnim
 import nest except Event, update, draw
 import nest/[coords, input, screen]
+
 export plugnim
 export nest except Event, update, draw
 
 import rendering/artist3D
-import errors
+
+import errors, scenes
 import inputs as ellipseInputs
 import resources as ellipseResources
 
@@ -456,8 +456,11 @@ proc nestIO(): IO =
     )
   )
 
-template update(dt: float64) =
+template update(dt: float64, sceneStack: var SceneStack) =
+  generatePluginFunctionCalls(earlyUpdate)
+  sceneStack.handleLoads()
   generatePluginFunctionCalls(update)
+  generatePluginFunctionCalls(lateUpdate)
 
 template draw(rendererArg: Renderer) =
   let renderer {.inject.}: Renderer = rendererArg
@@ -965,29 +968,6 @@ proc renderNestDynamicTexts(ui: UI) =
       item.bg,
     )
 
-template sdlApplication(events, step) =
-  let frequency = getPerformanceFrequency()
-  var
-    running {.inject.} = true
-    previousTime = getPerformanceCounter()
-    event: sdl3.Event
-    inputs {.inject.} = InputMap.init()
-  while running:
-    let frameStart = getPerformanceCounter()
-    let dt {.inject.} =
-      min(secondsBetween(previousTime, frameStart, frequency), MaxDeltaTime)
-    previousTime = frameStart
-    while pollEvent(event):
-      if event.`type` == EVENT_QUIT:
-        running = false
-      inputs.handleEvent(event)
-      let event {.inject.} = event
-      events
-    if not running:
-      break
-    step
-    inputs.finishFrame()
-
 template buildApplication*(appConfig: ApplicationConfig) =
   generatePluginContext()
   loadDynamicPlugins()
@@ -1025,9 +1005,14 @@ template buildApplication*(appConfig: ApplicationConfig) =
     var inputs {.inject.} = InputMap.init()
     var resources {.inject.} = ellipseResources.newResourceManager(app.renderer)
 
+    var
+      sceneStack {.inject.} = SceneStack.init()
+
     generatePluginFunctionCalls(load)
+
     let frequency = getPerformanceFrequency()
     let frameStepCounters = countersForSeconds(FixedUpdateSeconds, frequency)
+
     var
       running {.inject.} = true
       previousTime = getPerformanceCounter()
@@ -1049,6 +1034,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
       benchCachedUiFrames = 0
       benchUiDueFrames = 0
       benchNestEveryFrameFrames = 0
+
     let autoScreenshotDelay = getEnv("ELLIPSE_SCREENSHOT_AFTER_MS")
     if autoScreenshotDelay.len > 0:
       try:
@@ -1072,6 +1058,8 @@ template buildApplication*(appConfig: ApplicationConfig) =
           debugEcho "Ignoring invalid ELLIPSE_SCREENSHOT_FRAMES item: ", value
     while running:
       gui.beginInputFrame()
+      sceneStack.handlePushed()
+
       var nestInputDue = false
       while pollEvent(sdlEvent):
         if sdlEvent.`type` == EVENT_QUIT:
@@ -1086,6 +1074,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
           inputs.handleEvent(sdlEvent)
         let event {.inject.} = sdlEvent
         generatePluginFunctionCalls(event)
+        
       if not running:
         gui.finishInputFrame()
         break
@@ -1130,7 +1119,9 @@ template buildApplication*(appConfig: ApplicationConfig) =
         inputs.maskKeyboardInput()
       let benchFrameStart = getPerformanceCounter()
       let benchUpdateStart = benchFrameStart
-      update(dt)
+      update(dt, sceneStack)
+      sceneStack.handleUnloads()
+
       let benchDrawStart = getPerformanceCounter()
       draw(app.renderer)
       let benchUiStart = getPerformanceCounter()
@@ -1156,6 +1147,7 @@ template buildApplication*(appConfig: ApplicationConfig) =
         if benchFrames > 0 and not firstFrame:
           inc benchCachedUiFrames
       generatePluginFunctionCalls(postUi)
+      
       discard gui.drawRealtime()
       renderNestDynamicTexts(gui)
       let benchPresentStart = getPerformanceCounter()

@@ -16,5 +16,8 @@ export inputs
 import ellipse/resources
 export resources
 
+import ellipse/scenes
+export scenes
+
 import plugnim
 export plugnim

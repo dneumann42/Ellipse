@@ -152,6 +152,7 @@ type
     materials: Table[string, GpuMaterial]
     sampler: pointer
     samplerReady: bool
+    textureFiltering*: bool
     whiteTexture: GPUTexture
     defaultModel: Model
     colorTexture, depthTexture: GPUTexture
@@ -724,10 +725,20 @@ proc uploadTexturePixels(
 proc ensureSampler(artist: var Artist3DState) =
   if artist.device.isNil or artist.samplerReady:
     return
+  let filter =
+    if artist.textureFiltering:
+      GPU_FILTER_LINEAR
+    else:
+      GPU_FILTER_NEAREST
+  let mipmapMode =
+    if artist.textureFiltering:
+      GPU_SAMPLERMIPMAPMODE_LINEAR
+    else:
+      GPU_SAMPLERMIPMAPMODE_NEAREST
   var samplerInfo = GPUSamplerCreateInfo(
-    min_filter: GPU_FILTER_LINEAR,
-    mag_filter: GPU_FILTER_LINEAR,
-    mipmap_mode: GPU_SAMPLERMIPMAPMODE_LINEAR,
+    min_filter: filter,
+    mag_filter: filter,
+    mipmap_mode: mipmapMode,
     address_mode_u: GPU_SAMPLERADDRESSMODE_REPEAT,
     address_mode_v: GPU_SAMPLERADDRESSMODE_REPEAT,
     address_mode_w: GPU_SAMPLERADDRESSMODE_REPEAT,
@@ -1256,6 +1267,23 @@ proc setActiveCamera*(artist: Artist3D, id: string, camera: cameras.Camera) =
     return
   artist.state.allCameras[id] = camera
   artist.state.activeCameraID = id
+
+proc textureFiltering*(artist: Artist3D): bool =
+  if artist.state.isNil:
+    return false
+  artist.state.textureFiltering
+
+proc `textureFiltering=`*(artist: Artist3D, filtering: bool) =
+  if artist.state.isNil:
+    return
+  if artist.state.textureFiltering == filtering:
+    return
+  artist.state.textureFiltering = filtering
+  if artist.state.samplerReady:
+    releaseGpuSampler(artist.state.device, artist.state.sampler)
+    artist.state.sampler = nil
+    artist.state.samplerReady = false
+    artist.state[].ensureSampler()
 
 proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   artist.releaseRenderTarget()
