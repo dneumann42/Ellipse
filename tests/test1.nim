@@ -5,8 +5,24 @@
 #
 # To run these tests, simply execute `nimble test`.
 
-import unittest
+import std/[streams, times, unittest]
 
-import ellipse
-test "can add":
-  check add(5, 5) == 10
+import ellipse/profiles
+
+test "profile metadata round-trips through owl":
+  let original = Profile(
+    id: "profile-1",
+    name: "Dana \"D\"",
+    lastWritten: dateTime(2024, mJan, 2, 3, 4, 5, zone = utc())
+  )
+  let stream = newStringStream()
+
+  original.write(stream)
+  stream.setPosition(0)
+
+  var loaded: Profile
+  loaded.read(stream)
+
+  check loaded.id == original.id
+  check loaded.name == original.name
+  check loaded.lastWritten == original.lastWritten

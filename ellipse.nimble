@@ -17,6 +17,7 @@ requires "zlib >= 0.1.0"
 requires "https://github.com/nim-lang/sdl3"
 requires "plugnim"
 requires "nest"
+requires "crow"
 
 task shaders, "Build GLSL shaders":
   mkDir "build/shaders"

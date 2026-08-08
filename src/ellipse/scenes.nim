@@ -1,4 +1,4 @@
-import std/[sets, options, sequtils, macros]
+import std/[sets, options, sequtils, macros, json, streams, os]
 
 import plugnim
 
@@ -15,8 +15,49 @@ type
     load, push, goto, unload: HashSet[SceneID]
     stack: seq[SceneID]
 
+proc `%`*(sceneStack: SceneStack): JsonNode =
+  result = %* {
+    "load": sceneStack.load.toSeq().mapIt(% it),
+    "push": sceneStack.push.toSeq().mapIt(% it),
+    "goto": sceneStack.goto.toSeq().mapIt(% it),
+    "unload": sceneStack.unload.toSeq().mapIt(% it),
+    "stack": sceneStack.stack,
+  }
+
+proc initFromJson*(sceneStack: var SceneStack, js: JsonNode, path: var string) =
+  sceneStack.load = js["load"].toSeq().mapIt(it.to(string)).toHashSet()
+  sceneStack.push = js["push"].toSeq().mapIt(it.to(string)).toHashSet()
+  sceneStack.goto = js["goto"].toSeq().mapIt(it.to(string)).toHashSet()
+  sceneStack.unload = js["unload"].toSeq().mapIt(it.to(string)).toHashSet()
+  sceneStack.stack = js["stack"].toSeq().mapIt(it.to(string))
+
 proc init*(T: typedesc[SceneStack]): T =
   T(stack: @[])
+
+proc read*(sceneStack: var SceneStack, stream: Stream) =
+  let contents = stream.readAll()
+  sceneStack = parseJson(contents).to(SceneStack)
+
+proc write*(sceneStack: SceneStack, stream: Stream) =
+  stream.write((% sceneStack).pretty)
+
+proc save*(sceneStack: SceneStack) =
+  var persisted = SceneStack(stack: sceneStack.stack)
+  var fs = openFileStream("scene-stack.json", fmWrite)
+  defer: fs.close()
+  persisted.write(fs)
+
+proc loadSceneStackState*(sceneStack: var SceneStack) =
+  if not fileExists("scene-stack.json"):
+    sceneStack.save()
+    return
+  var fs = openFileStream("scene-stack.json", fmRead)
+  defer: fs.close()
+  sceneStack.read(fs)
+  sceneStack.load.clear()
+  sceneStack.push.clear()
+  sceneStack.goto.clear()
+  sceneStack.unload.clear()
 
 proc activeScene*(self: SceneStack): SceneID =
   result = ""
@@ -57,12 +98,16 @@ proc handlePushed*(self: var SceneStack) =
     self.stack.add(p)
     self.push.excl(p)
     self.load.incl(p)
+  self.save()
 
 proc handleLoads*(self: var SceneStack) =
   self.load.clear()
 
 proc handleUnloads*(self: var SceneStack) =
+  let changed = self.unload.len > 0
   self.unload.clear()
+  if changed:
+    self.save()
 
 macro scene*(args: varargs[untyped]): untyped =
   if args.len < 2:

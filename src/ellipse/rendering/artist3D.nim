@@ -1200,7 +1200,8 @@ proc createTrianglePipelines(artist: var Artist3DState) =
   artist.waterVertexShader =
     createShader(artist.device, "water.vert.spv", GPU_SHADERSTAGE_VERTEX, 2)
   artist.waterFragmentShader =
-    createShader(artist.device, "water.frag.spv", GPU_SHADERSTAGE_FRAGMENT, 2)
+    createShader(artist.device, "water.frag.spv", GPU_SHADERSTAGE_FRAGMENT, 2,
+      samplers = 1)
   artist.skyVertexShader =
     createShader(artist.device, "sky.vert.spv", GPU_SHADERSTAGE_VERTEX)
   artist.skyFragmentShader =
@@ -1562,8 +1563,8 @@ proc drawModel(
       commandBuffer, 1, addr water, sizeof(WaterUniforms).uint32
     )
   bindGPUGraphicsPipeline(pass, pipeline)
-  if model.renderOptions.effect == StandardEffect and state.samplerReady and
-      texture != nil:
+  if model.renderOptions.effect in {StandardEffect, WaterEffect} and
+      state.samplerReady and texture != nil:
     bindGpuFragmentSamplers(pass, 0, addr samplerBinding, 1)
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)

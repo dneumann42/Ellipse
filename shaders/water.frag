@@ -5,6 +5,8 @@ layout(location = 1) in vec2 vUv;
 
 layout(location = 0) out vec4 outColor;
 
+layout(set = 2, binding = 0) uniform sampler2D uTexture;
+
 layout(set = 3, binding = 1) uniform Water {
   vec3 uCameraPosition;
   float uTime;
@@ -95,10 +97,14 @@ void main() {
   float crest = waveHeight(vWorldPosition.xz) / max(uWaveAmplitude, 0.001);
   float breakup = valueNoise(vWorldPosition.xz * 0.31 + uTime * uWaveSpeed * 0.08);
   float detail = valueNoise(vWorldPosition.xz * 1.17 - uTime * uWaveSpeed * 0.16);
+  vec2 textureUv = vUv * 24.0 + vec2(uTime * uWaveSpeed * 0.006,
+      -uTime * uWaveSpeed * 0.004);
+  vec3 waterTexture = texture(uTexture, textureUv).rgb;
   float foam = smoothstep(0.52, 0.92, crest + breakup * 0.28) *
       smoothstep(0.38, 0.78, detail);
   float depthTint = 0.34 + fresnel * 0.42 + diffuse * 0.18 + breakup * 0.07;
   vec3 color = mix(uDeepColor, uSurfaceColor, clamp(depthTint, 0.0, 1.0));
+  color = mix(color * 0.5, waterTexture * vec3(0.62, 0.86, 1.12), 0.72);
   color *= 0.55 + diffuse * 0.45;
   color += vec3(0.70, 0.92, 1.0) * broadSpecular * uSpecularStrength * 0.24;
   color += vec3(0.88, 0.97, 1.0) * (specular + foam * 0.11);

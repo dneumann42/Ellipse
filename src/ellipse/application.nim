@@ -1056,6 +1056,8 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
     var
       sceneStack {.inject.} = SceneStack.init()
 
+    sceneStack.loadSceneStackState()
+
     blk
     generatePluginFunctionCalls(load)
 
