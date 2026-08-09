@@ -1,5 +1,7 @@
 # API around the owl programming language (development name crow)
 
+import std/streams
+
 import crow as owl
 export owl
 
@@ -12,6 +14,10 @@ proc fromOwl*(v: Value, n: var SomeNumber) =
     n = v.number.toString()
   else:
     n = v.number
+
+proc readOwl*(stream: Stream, filename: string): owl.Value =
+  var evaluator = Evaluator.init()
+  evaluator.exec(owl.parse(stream.readAll(), filename))
 
 when isMainModule:
   var

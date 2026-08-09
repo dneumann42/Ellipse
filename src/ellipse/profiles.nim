@@ -32,16 +32,12 @@ proc fromOwl*(v: owl.Value, p: var Profile) =
   v.entries["lastWritten"].fromOwl(lastWritten)
   p.lastWritten = times.parse(lastWritten, DateFormat, utc())
 
-proc readOwl(stream: Stream): owl.Value =
-  var evaluator = Evaluator.init()
-  evaluator.exec(owl.parse(stream.readAll(), "profile.owl"))
-
 proc write*(profile: Profile, stream: Stream) =
   stream.write($profile.toOwl())
   stream.write("\n")
 
 proc read*(profile: var Profile, stream: Stream) =
-  readOwl(stream).fromOwl(profile)
+  readOwl(stream, "profile.owl").fromOwl(profile)
 
 iterator profiles*(): Profile =
   let profilesDir = getDataDir() / "profiles"

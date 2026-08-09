@@ -856,6 +856,24 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event): bool =
     ui.mouseUp()
     ui.requestRedrawAfter(0)
     return true
+  elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
+      event.button.button == BUTTON_MIDDLE:
+    ui.mouseMove(event.button.x.int, event.button.y.int)
+    ui.mouseMiddleDown()
+    ui.requestRedrawAfter(0)
+    return true
+  elif eventType == uint32(EVENT_MOUSE_BUTTON_UP) and
+      event.button.button == BUTTON_MIDDLE:
+    ui.mouseMove(event.button.x.int, event.button.y.int)
+    ui.mouseMiddleUp()
+    ui.requestRedrawAfter(0)
+    return true
+  elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
+      event.button.button == BUTTON_RIGHT:
+    ui.mouseMove(event.button.x.int, event.button.y.int)
+    ui.mouseRightDown()
+    ui.requestRedrawAfter(0)
+    return true
   elif eventType == uint32(EVENT_MOUSE_WHEEL):
     ui.mouseMove(event.wheel.mouse_x.int, event.wheel.mouse_y.int)
     ui.mouseWheel(event.wheel.x.float64, event.wheel.y.float64)

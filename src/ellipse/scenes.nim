@@ -1,6 +1,9 @@
-import std/[sets, options, sequtils, macros, json, streams, os]
+import std/[sets, sequtils, macros, streams, os, tables]
 
+import owl
 import plugnim
+
+const SceneStackPath = "scene-stack.owl"
 
 type
   SceneID* = string
@@ -15,49 +18,74 @@ type
     load, push, goto, unload: HashSet[SceneID]
     stack: seq[SceneID]
 
-proc `%`*(sceneStack: SceneStack): JsonNode =
-  result = %* {
-    "load": sceneStack.load.toSeq().mapIt(% it),
-    "push": sceneStack.push.toSeq().mapIt(% it),
-    "goto": sceneStack.goto.toSeq().mapIt(% it),
-    "unload": sceneStack.unload.toSeq().mapIt(% it),
-    "stack": sceneStack.stack,
-  }
-
-proc initFromJson*(sceneStack: var SceneStack, js: JsonNode, path: var string) =
-  sceneStack.load = js["load"].toSeq().mapIt(it.to(string)).toHashSet()
-  sceneStack.push = js["push"].toSeq().mapIt(it.to(string)).toHashSet()
-  sceneStack.goto = js["goto"].toSeq().mapIt(it.to(string)).toHashSet()
-  sceneStack.unload = js["unload"].toSeq().mapIt(it.to(string)).toHashSet()
-  sceneStack.stack = js["stack"].toSeq().mapIt(it.to(string))
-
 proc init*(T: typedesc[SceneStack]): T =
   T(stack: @[])
 
+proc toOwl(ids: HashSet[SceneID]): owl.Value =
+  result = list(ids.toSeq().mapIt(toOwl it))
+
+proc toOwl(ids: seq[SceneID]): owl.Value =
+  result = list(ids.mapIt(toOwl it))
+
+proc fromOwl(v: owl.Value, ids: var HashSet[SceneID]) =
+  doAssert v.kind == List
+  ids.clear()
+  for item in v.items:
+    var id: SceneID
+    item.fromOwl(id)
+    ids.incl(id)
+
+proc fromOwl(v: owl.Value, ids: var seq[SceneID]) =
+  doAssert v.kind == List
+  ids.setLen(0)
+  for item in v.items:
+    var id: SceneID
+    item.fromOwl(id)
+    ids.add(id)
+
+proc toOwl*(sceneStack: SceneStack): owl.Value =
+  result = dictionary {
+    "load": sceneStack.load.toOwl(),
+    "push": sceneStack.push.toOwl(),
+    "goto": sceneStack.goto.toOwl(),
+    "unload": sceneStack.unload.toOwl(),
+    "stack": sceneStack.stack.toOwl(),
+  }.toTable()
+
+proc fromOwl*(v: owl.Value, sceneStack: var SceneStack) =
+  doAssert v.kind == Dictionary
+  v.entries["load"].fromOwl(sceneStack.load)
+  v.entries["push"].fromOwl(sceneStack.push)
+  v.entries["goto"].fromOwl(sceneStack.goto)
+  v.entries["unload"].fromOwl(sceneStack.unload)
+  v.entries["stack"].fromOwl(sceneStack.stack)
+
 proc read*(sceneStack: var SceneStack, stream: Stream) =
-  let contents = stream.readAll()
-  sceneStack = parseJson(contents).to(SceneStack)
+  readOwl(stream, SceneStackPath).fromOwl(sceneStack)
 
 proc write*(sceneStack: SceneStack, stream: Stream) =
-  stream.write((% sceneStack).pretty)
+  stream.write($sceneStack.toOwl())
+  stream.write("\n")
 
 proc save*(sceneStack: SceneStack) =
   var persisted = SceneStack(stack: sceneStack.stack)
-  var fs = openFileStream("scene-stack.json", fmWrite)
+  var fs = openFileStream(SceneStackPath, fmWrite)
   defer: fs.close()
   persisted.write(fs)
 
 proc loadSceneStackState*(sceneStack: var SceneStack) =
-  if not fileExists("scene-stack.json"):
+  if not fileExists(SceneStackPath):
     sceneStack.save()
     return
-  var fs = openFileStream("scene-stack.json", fmRead)
+  var fs = openFileStream(SceneStackPath, fmRead)
   defer: fs.close()
   sceneStack.read(fs)
   sceneStack.load.clear()
   sceneStack.push.clear()
   sceneStack.goto.clear()
   sceneStack.unload.clear()
+  if sceneStack.stack.len > 0:
+    sceneStack.load.incl(sceneStack.stack[^1])
 
 proc activeScene*(self: SceneStack): SceneID =
   result = ""
@@ -90,6 +118,7 @@ proc pop*(self: var SceneStack): SceneID {.discardable.} =
 
 proc goto*(self: var SceneStack, sceneId: SceneID): SceneID =
   result = self.pop()
+  self.stack.setLen(0)
   self.push(sceneId)
 
 proc handlePushed*(self: var SceneStack) =
