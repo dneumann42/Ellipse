@@ -2,7 +2,7 @@
 
 import std/streams
 
-import crow as owl
+import pkg/owl as owl
 export owl
 
 proc toOwl*(n: SomeNumber): Value =
@@ -24,4 +24,4 @@ when isMainModule:
     f: float64
   toOwl(3.1415926).fromOwl(f)
   echo f
-  
+

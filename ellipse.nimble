@@ -17,7 +17,7 @@ requires "zlib >= 0.1.0"
 requires "https://github.com/nim-lang/sdl3"
 requires "plugnim"
 requires "nest"
-requires "crow"
+requires "owl"
 
 task shaders, "Build GLSL shaders":
   mkDir "build/shaders"
@@ -27,3 +27,8 @@ task shaders, "Build GLSL shaders":
   exec "glslc -fshader-stage=frag shaders/water.frag -o build/shaders/water.frag.spv"
   exec "glslc -fshader-stage=vert shaders/sky.vert -o build/shaders/sky.vert.spv"
   exec "glslc -fshader-stage=frag shaders/sky.frag -o build/shaders/sky.frag.spv"
+  exec "glslc -fshader-stage=vert shaders/fullscreen.vert -o build/shaders/fullscreen.vert.spv"
+  exec "glslc -fshader-stage=frag shaders/ssao.frag -o build/shaders/ssao.frag.spv"
+  exec "glslc -fshader-stage=frag shaders/composite.frag -o build/shaders/composite.frag.spv"
+  exec "glslc -fshader-stage=frag shaders/depthPreview.frag -o build/shaders/depthPreview.frag.spv"
+  exec "glslc -fshader-stage=frag shaders/depth.frag -o build/shaders/depth.frag.spv"

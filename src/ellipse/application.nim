@@ -9,6 +9,7 @@ export plugnim
 export nest except Event, update, draw
 
 import rendering/artist3D
+import rendering/canvas
 
 import aseprite
 import errors, scenes
@@ -23,6 +24,11 @@ type
   NestImageSlot = object
     texture: Texture
     path: string
+    width, height: int
+    externalID: string
+
+  NestExternalTexture = object
+    texture: Texture
     width, height: int
 
   NestTextSlot = object
@@ -62,6 +68,7 @@ var
   nestFonts: seq[NestFontSlot]
   nestImages: seq[NestImageSlot]
   nestImageByPath: Table[string, screen.Image]
+  nestExternalTextures: Table[string, NestExternalTexture]
   nestTextByKey: Table[string, NestTextSlot]
   nestPickedFiles: Table[WidgetID, string]
   nestFilePickerErrors: Table[WidgetID, string]
@@ -76,6 +83,7 @@ var
   hasApplicationRedraw: bool
   applicationRedrawCounter: uint64
   nestEveryFrameRequested: bool
+  nestCanvas: ptr Canvas
   currentFrameDeltaSecondsValue = FixedUpdateSeconds
 
 proc imgLoad(file: cstring): ptr Surface {.
@@ -97,12 +105,13 @@ proc `=destroy`*(app: var Application) =
       slot.texture = nil
   nestTextByKey.clear()
   for slot in nestImages.mitems:
-    if slot.texture != nil:
+    if slot.texture != nil and slot.externalID.len == 0:
       destroyTexture(slot.texture)
       slot.texture = nil
   if nestImages.len > 0:
     nestImages.setLen(0)
   nestImageByPath.clear()
+  nestExternalTextures.clear()
   if nestCachedTexture != nil:
     destroyTexture(nestCachedTexture)
     nestCachedTexture = nil
@@ -160,6 +169,37 @@ proc clearNestTextureCache() =
     nestCachedTexture = nil
   nestCachedTextureWidth = 0
   nestCachedTextureHeight = 0
+
+proc setNestCanvas*(canvas: var Canvas) =
+  nestCanvas = addr canvas
+
+proc setNestExternalTexture*(id: string, texture: Texture, width, height: int) =
+  ## Makes a renderer-owned texture available to Nest's normal image widget.
+  ## The caller retains ownership; this registry never destroys the texture.
+  if id.len == 0: return
+  if texture == nil or width <= 0 or height <= 0:
+    nestExternalTextures.del(id)
+  else:
+    nestExternalTextures[id] = NestExternalTexture(texture: texture,
+      width: width, height: height)
+
+proc prepareNestCanvas(ui: var UI) =
+  if nestCanvas == nil:
+    return
+  nestCanvas[].begin(0, 0, 0, 0)
+  if ui.windowWidth != nestCanvas[].width or ui.windowHeight != nestCanvas[].height:
+    ui.resizeWindow(nestCanvas[].width, nestCanvas[].height)
+    ui.markAllDirty()
+    clearNestTextureCache()
+
+proc finishNestCanvas() =
+  if nestCanvas != nil:
+    nestCanvas[].finish()
+
+proc nestEventPoint(x, y: cfloat): tuple[x, y: cfloat] =
+  if nestCanvas == nil:
+    return (x, y)
+  nestCanvas[].mapWindowPoint(x, y)
 
 proc requestFrameAfter*(ms: int) =
   let
@@ -650,6 +690,11 @@ proc nestFillRect(r: coords.Rect, color: screen.Color) {.nimcall.} =
   withNestBlendMode:
     discard renderFillRect(nestRenderer, addr rect)
 
+proc nestFillRoundedRect(
+    r: coords.Rect, radii: screen.CornerRadii, color: screen.Color
+) {.nimcall.} =
+  screen.fillRoundedRect(r, radii, color)
+
 proc nestLineRect(r: coords.Rect, color: screen.Color) {.nimcall.} =
   if nestRenderer == nil:
     return
@@ -657,6 +702,11 @@ proc nestLineRect(r: coords.Rect, color: screen.Color) {.nimcall.} =
   var rect = r.toFRect()
   withNestBlendMode:
     discard renderRect(nestRenderer, addr rect)
+
+proc nestLineRoundedRect(
+    r: coords.Rect, radii: screen.CornerRadii, color: screen.Color
+) {.nimcall.} =
+  screen.lineRoundedRect(r, radii, color)
 
 proc nestDrawLine(x1, y1, x2, y2: int, color: screen.Color) {.nimcall.} =
   if nestRenderer == nil:
@@ -679,6 +729,14 @@ proc nestLoadImage(path: string): screen.Image {.nimcall.} =
     return screen.Image(0)
   if nestImageByPath.hasKey(path):
     return nestImageByPath[path]
+
+  if nestExternalTextures.hasKey(path):
+    let external = nestExternalTextures[path]
+    nestImages.add NestImageSlot(texture: external.texture, path: path,
+      width: external.width, height: external.height, externalID: path)
+    result = screen.Image(nestImages.len)
+    nestImageByPath[path] = result
+    return
 
   var asepritePixels: seq[uint8]
   let surface =
@@ -721,14 +779,19 @@ proc nestFreeImage(image: screen.Image) {.nimcall.} =
   if index >= 0 and index < nestImages.len and nestImages[index].texture != nil:
     if nestImages[index].path.len > 0:
       nestImageByPath.del nestImages[index].path
-    destroyTexture(nestImages[index].texture)
+    if nestImages[index].externalID.len == 0:
+      destroyTexture(nestImages[index].texture)
     nestImages[index].texture = nil
 
 proc nestDrawImage(image: screen.Image, src, dst: coords.Rect) {.nimcall.} =
   let index = image.int - 1
   if nestRenderer == nil or index < 0 or index >= nestImages.len:
     return
-  let texture = nestImages[index].texture
+  let texture =
+    if nestImages[index].externalID.len > 0:
+      nestExternalTextures.getOrDefault(nestImages[index].externalID).texture
+    else:
+      nestImages[index].texture
   if texture == nil:
     return
   var source = src.toFRect()
@@ -829,15 +892,17 @@ proc createNest*(width = 1280, height = 720): UI =
 proc handleNestEvent*(ui: var UI, event: sdl3.Event): bool =
   let eventType = uint32(event.common.`type`)
   if eventType == uint32(EVENT_WINDOW_RESIZED):
-    ui.resizeWindow(event.window.data1, event.window.data2)
-    ui.markAllDirty()
-    ui.requestRedrawAfter(0)
-    clearNestTextureCache()
+    if nestCanvas == nil or nestCanvas[].sizeMode == Window:
+      ui.resizeWindow(event.window.data1, event.window.data2)
+      ui.markAllDirty()
+      ui.requestRedrawAfter(0)
+      clearNestTextureCache()
     return true
   elif eventType == uint32(EVENT_MOUSE_MOTION):
     let
-      x = event.motion.x.int
-      y = event.motion.y.int
+      point = nestEventPoint(event.motion.x, event.motion.y)
+      x = point.x.int
+      y = point.y.int
       overInteractiveBeforeMove = ui.pointerOverInteractive(x, y)
       widgetActive = ui.hasPendingWidgetEvents()
     ui.mouseMove(x, y)
@@ -847,35 +912,41 @@ proc handleNestEvent*(ui: var UI, event: sdl3.Event): bool =
     return false
   elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
       event.button.button == BUTTON_LEFT:
-    ui.mouseMove(event.button.x.int, event.button.y.int)
+    let point = nestEventPoint(event.button.x, event.button.y)
+    ui.mouseMove(point.x.int, point.y.int)
     ui.mouseDown()
     ui.requestRedrawAfter(0)
     return true
   elif eventType == uint32(EVENT_MOUSE_BUTTON_UP) and event.button.button == BUTTON_LEFT:
-    ui.mouseMove(event.button.x.int, event.button.y.int)
+    let point = nestEventPoint(event.button.x, event.button.y)
+    ui.mouseMove(point.x.int, point.y.int)
     ui.mouseUp()
     ui.requestRedrawAfter(0)
     return true
   elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
       event.button.button == BUTTON_MIDDLE:
-    ui.mouseMove(event.button.x.int, event.button.y.int)
+    let point = nestEventPoint(event.button.x, event.button.y)
+    ui.mouseMove(point.x.int, point.y.int)
     ui.mouseMiddleDown()
     ui.requestRedrawAfter(0)
     return true
   elif eventType == uint32(EVENT_MOUSE_BUTTON_UP) and
       event.button.button == BUTTON_MIDDLE:
-    ui.mouseMove(event.button.x.int, event.button.y.int)
+    let point = nestEventPoint(event.button.x, event.button.y)
+    ui.mouseMove(point.x.int, point.y.int)
     ui.mouseMiddleUp()
     ui.requestRedrawAfter(0)
     return true
   elif eventType == uint32(EVENT_MOUSE_BUTTON_DOWN) and
       event.button.button == BUTTON_RIGHT:
-    ui.mouseMove(event.button.x.int, event.button.y.int)
+    let point = nestEventPoint(event.button.x, event.button.y)
+    ui.mouseMove(point.x.int, point.y.int)
     ui.mouseRightDown()
     ui.requestRedrawAfter(0)
     return true
   elif eventType == uint32(EVENT_MOUSE_WHEEL):
-    ui.mouseMove(event.wheel.mouse_x.int, event.wheel.mouse_y.int)
+    let point = nestEventPoint(event.wheel.mouse_x, event.wheel.mouse_y)
+    ui.mouseMove(point.x.int, point.y.int)
     ui.mouseWheel(event.wheel.x.float64, event.wheel.y.float64)
     ui.requestRedrawAfter(0)
     return true
@@ -946,8 +1017,20 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
       nestSetClipRect(command.rect)
     of FillRect:
       nestFillRect(command.rect, command.color)
+    of FillRoundedRect:
+      nestFillRoundedRect(
+        command.roundedRect,
+        command.roundedRadii,
+        command.roundedColor,
+      )
     of LineRect:
       nestLineRect(command.rect, command.color)
+    of LineRoundedRect:
+      nestLineRoundedRect(
+        command.roundedRect,
+        command.roundedRadii,
+        command.roundedColor,
+      )
     of DrawLine:
       nestDrawLine(command.x1, command.y1, command.x2, command.y2,
           command.lineColor)
@@ -973,6 +1056,7 @@ proc replayDrawCommands*(commands: openArray[screen.DrawCommand]) =
   nestClearClipRect()
 
 template renderNest*(ui: var UI, body: untyped) =
+  prepareNestCanvas(ui)
   ui.setDrawTicks(sdl3.getTicks().int)
   var drawCommands {.inject.}: seq[screen.DrawCommand]
   ui.setDrawCommandRelays(addr drawCommands, nestMeasureText, nestMeasureImage)
@@ -999,12 +1083,17 @@ template renderNest*(ui: var UI, body: untyped) =
       blitNestTextureCache()
     else:
       replayDrawCommands(nestCachedDrawCommands)
+  finishNestCanvas()
 
 proc renderCachedNest*() =
+  if nestCanvas != nil:
+    # The UI dimensions were synchronized by the previous full UI frame.
+    nestCanvas[].begin(0, 0, 0, 0)
   if nestCachedTexture != nil:
     blitNestTextureCache()
   else:
     replayDrawCommands(nestCachedDrawCommands)
+  finishNestCanvas()
 
 proc renderNestDynamicTexts(ui: UI) =
   if nestDynamicTexts.len == 0:
@@ -1063,6 +1152,7 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
       raiseError("Failed to create renderer")
     attempt setRenderVSync(app.renderer, 0), "Failed to disable vsync"
     installArtist3DRenderer(app.renderer)
+    installCanvasRenderer(app.renderer)
     app.installNestDriver()
 
     var gui {.inject.} = createNest()
@@ -1143,7 +1233,7 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
           inputs.handleEvent(sdlEvent)
         let event {.inject.} = sdlEvent
         generatePluginFunctionCalls(event)
-        
+
       if not running:
         gui.finishInputFrame()
         break
@@ -1216,12 +1306,13 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
         if benchFrames > 0 and not firstFrame:
           inc benchCachedUiFrames
       generatePluginFunctionCalls(postUi)
-      
+
       discard gui.drawRealtime()
       renderNestDynamicTexts(gui)
       let benchPresentStart = getPerformanceCounter()
       if benchFrameCount in screenshotFrames:
-        let path = screenshotName(appConfig.appname & "-frame-" & $benchFrameCount)
+        let path = screenshotName(appConfig.appname & "-frame-" &
+            $benchFrameCount)
         if dumpRendererScreenshot(app.renderer, path):
           echo "Saved screenshot: ", path
       if screenshotRequested:

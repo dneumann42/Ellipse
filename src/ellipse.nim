@@ -7,6 +7,9 @@ export update, draw
 import ellipse/rendering/artist3D
 export artist3d
 
+import ellipse/rendering/canvas
+export canvas
+
 import ellipse/rendering/cameras
 export cameras
 

@@ -3,6 +3,7 @@ import std/[os, strformat, tables]
 import sdl3, vmath
 
 import cameras
+import canvas
 import ../errors
 import ../resources
 
@@ -29,6 +30,10 @@ type
 
   RenderEffect* = enum
     StandardEffect, WaterEffect
+
+  RenderTarget* = enum
+    ## Live textures produced for each frame of the 3D renderer.
+    SceneColorTarget, DepthTarget, AmbientOcclusionTarget, CompositeTarget
 
   TextureSampling* = enum
     Single, Splat
@@ -57,6 +62,12 @@ type
     skybox*: TextureResourceHandle
     exposure*: float32
     useSkybox*: bool
+
+  SsaoOptions* = object
+    enabled*: bool
+    radius*: float32
+    strength*: float32
+    bias*: float32
 
   RenderOptions* = object
     effect*: RenderEffect
@@ -144,14 +155,24 @@ type
     zenithUseSkybox: Vec4
     groundColor: Vec4
 
+  SsaoUniforms = object
+    resolutionRadius: Vec4
+    projection: Vec4
+    strengthBias: Vec4
+
 type
   Artist3DState = object
     renderer: Renderer
     device: GPUDevice
-    solidPipeline, overlayPipeline, wireframePipeline, overlayWireframePipeline,
-      waterPipeline, skyPipeline: GPUGraphicsPipeline
-    vertexShader, waterVertexShader, skyVertexShader: GPUShader
-    fragmentShader, waterFragmentShader, skyFragmentShader: GPUShader
+    solidPipeline, overlayPipeline, wireframePipeline,
+      overlayWireframePipeline: GPUGraphicsPipeline
+    waterPipeline, skyPipeline, depthPipeline, ssaoPipeline, compositePipeline,
+      depthPreviewPipeline: GPUGraphicsPipeline
+    vertexShader, waterVertexShader, skyVertexShader,
+      fullscreenVertexShader: GPUShader
+    fragmentShader, waterFragmentShader, skyFragmentShader,
+      ssaoFragmentShader: GPUShader
+    compositeFragmentShader, depthPreviewFragmentShader, depthFragmentShader: GPUShader
     meshes: Table[MeshID, Mesh]
     materials: Table[string, GpuMaterial]
     sampler: pointer
@@ -161,9 +182,12 @@ type
     whiteCubeTexture: GPUTexture
     skybox: GpuSkybox
     defaultModel: Model
-    colorTexture, depthTexture: GPUTexture
-    renderTexture: Texture
+    colorTexture, depthTexture, depthDataTexture, ssaoTexture, compositeTexture,
+      depthPreviewTexture: GPUTexture
+    renderTexture, ssaoRenderTexture, compositeRenderTexture,
+      depthPreviewRenderTexture: Texture
     textureWidth, textureHeight: uint32
+    ssao: SsaoOptions
     allCameras: Table[string, cameras.Camera]
     activeCameraID: string
 
@@ -414,6 +438,17 @@ proc init*(
   )
 
 proc init*(
+    T: typedesc[SsaoOptions],
+    enabled = true,
+    radius = 3.2'f32,
+    strength = 1.15'f32,
+    bias = 0.012'f32,
+): T =
+  ## Tuned defaults for a subtle, stable contact-shadow pass.
+  T(enabled: enabled, radius: max(radius, 0.1'f32),
+    strength: clamp(strength, 0'f32, 3'f32), bias: max(bias, 0'f32))
+
+proc init*(
     T: typedesc[RenderOptions],
     mode = SolidMesh,
     depthTest = true,
@@ -527,12 +562,33 @@ proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.renderTexture.isNil:
     destroyTexture(artist.renderTexture)
     artist.renderTexture = nil
+  if not artist.ssaoRenderTexture.isNil:
+    destroyTexture(artist.ssaoRenderTexture)
+    artist.ssaoRenderTexture = nil
+  if not artist.compositeRenderTexture.isNil:
+    destroyTexture(artist.compositeRenderTexture)
+    artist.compositeRenderTexture = nil
+  if not artist.depthPreviewRenderTexture.isNil:
+    destroyTexture(artist.depthPreviewRenderTexture)
+    artist.depthPreviewRenderTexture = nil
   if not artist.colorTexture.isNil:
     releaseGPUTexture(artist.device, artist.colorTexture)
     artist.colorTexture = nil
   if not artist.depthTexture.isNil:
     releaseGPUTexture(artist.device, artist.depthTexture)
     artist.depthTexture = nil
+  if not artist.depthDataTexture.isNil:
+    releaseGPUTexture(artist.device, artist.depthDataTexture)
+    artist.depthDataTexture = nil
+  if not artist.ssaoTexture.isNil:
+    releaseGPUTexture(artist.device, artist.ssaoTexture)
+    artist.ssaoTexture = nil
+  if not artist.compositeTexture.isNil:
+    releaseGPUTexture(artist.device, artist.compositeTexture)
+    artist.compositeTexture = nil
+  if not artist.depthPreviewTexture.isNil:
+    releaseGPUTexture(artist.device, artist.depthPreviewTexture)
+    artist.depthPreviewTexture = nil
   artist.textureWidth = 0
   artist.textureHeight = 0
 
@@ -590,6 +646,18 @@ proc releasePipelines(artist: var Artist3DState) =
   if not artist.skyPipeline.isNil:
     releaseGPUGraphicsPipeline(artist.device, artist.skyPipeline)
     artist.skyPipeline = nil
+  if not artist.depthPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.depthPipeline)
+    artist.depthPipeline = nil
+  if not artist.ssaoPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.ssaoPipeline)
+    artist.ssaoPipeline = nil
+  if not artist.compositePipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.compositePipeline)
+    artist.compositePipeline = nil
+  if not artist.depthPreviewPipeline.isNil:
+    releaseGPUGraphicsPipeline(artist.device, artist.depthPreviewPipeline)
+    artist.depthPreviewPipeline = nil
 
 proc createMeshBuffer(
     artist: var Artist3DState, usage: GPUBufferUsageFlags, size: uint32,
@@ -978,7 +1046,8 @@ proc uploadMesh(artist: var Artist3DState, meshID: MeshID) =
   mesh.indicesDirty = false
 
 proc createTrianglePipeline(
-    artist: var Artist3DState, mode: MeshRenderMode, depthTest, depthWrite: bool
+    artist: var Artist3DState, mode: MeshRenderMode, depthTest, depthWrite: bool,
+    fragmentShader: GPUShader = nil,
 ): GPUGraphicsPipeline =
   var vertexBuffers = [
     GPUVertexBufferDescription(
@@ -1043,7 +1112,7 @@ proc createTrianglePipeline(
   )
   var pipelineInfo = GpuGraphicsPipelineCreateInfo(
     vertex_shader: artist.vertexShader,
-    fragment_shader: artist.fragmentShader,
+    fragment_shader: if fragmentShader.isNil: artist.fragmentShader else: fragmentShader,
     vertex_input_state: GPUVertexInputState(
       vertex_buffer_descriptions:
     cast[ptr UncheckedArray[GPUVertexBufferDescription]](addr vertexBuffers[0]),
@@ -1189,6 +1258,37 @@ proc createSkyPipeline(artist: var Artist3DState): GPUGraphicsPipeline =
   if result.isNil:
     raiseGpuError("Failed to create GPU sky pipeline")
 
+proc createPostProcessPipeline(artist: var Artist3DState,
+    fragmentShader: GPUShader): GPUGraphicsPipeline =
+  var colorTarget = GPUColorTargetDescription(
+    format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+    blend_state: GPUColorTargetBlendState(
+      color_write_mask: (GPU_COLORCOMPONENT_R or GPU_COLORCOMPONENT_G or
+        GPU_COLORCOMPONENT_B or GPU_COLORCOMPONENT_A).GPUColorComponentFlags,
+      enable_color_write_mask: true,
+    ),
+  )
+  var targetInfo = GPUGraphicsPipelineTargetInfo(
+    color_target_descriptions: cast[ptr UncheckedArray[
+        GPUColorTargetDescription]](
+      addr colorTarget),
+    num_color_targets: 1,
+  )
+  var pipelineInfo = GpuGraphicsPipelineCreateInfo(
+    vertex_shader: artist.fullscreenVertexShader,
+    fragment_shader: fragmentShader,
+    primitive_type: GPU_PRIMITIVETYPE_TRIANGLELIST,
+    rasterizer_state: GPURasterizerState(
+      fill_mode: GPU_FILLMODE_FILL, cull_mode: GPU_CULLMODE_NONE,
+      front_face: GPU_FRONTFACE_CLOCKWISE,
+    ),
+    multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    target_info: targetInfo,
+  )
+  result = createGpuGraphicsPipeline(artist.device, addr pipelineInfo)
+  if result.isNil:
+    raiseGpuError("Failed to create GPU post-process pipeline")
+
 proc createTrianglePipelines(artist: var Artist3DState) =
   artist.releasePipelines()
   artist.vertexShader =
@@ -1207,6 +1307,17 @@ proc createTrianglePipelines(artist: var Artist3DState) =
   artist.skyFragmentShader =
     createShader(artist.device, "sky.frag.spv", GPU_SHADERSTAGE_FRAGMENT,
         samplers = 1)
+  artist.fullscreenVertexShader = createShader(artist.device,
+      "fullscreen.vert.spv", GPU_SHADERSTAGE_VERTEX, uniformBuffers = 0)
+  artist.ssaoFragmentShader = createShader(artist.device, "ssao.frag.spv",
+      GPU_SHADERSTAGE_FRAGMENT, samplers = 1)
+  artist.compositeFragmentShader = createShader(artist.device,
+      "composite.frag.spv", GPU_SHADERSTAGE_FRAGMENT, uniformBuffers = 0,
+      samplers = 2)
+  artist.depthPreviewFragmentShader = createShader(artist.device,
+      "depthPreview.frag.spv", GPU_SHADERSTAGE_FRAGMENT, samplers = 1)
+  artist.depthFragmentShader = createShader(artist.device, "depth.frag.spv",
+      GPU_SHADERSTAGE_FRAGMENT)
   artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true, true)
   artist.overlayPipeline = artist.createTrianglePipeline(SolidMesh, false, false)
   artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, true, false)
@@ -1215,6 +1326,14 @@ proc createTrianglePipelines(artist: var Artist3DState) =
   )
   artist.waterPipeline = artist.createWaterPipeline()
   artist.skyPipeline = artist.createSkyPipeline()
+  artist.depthPipeline = artist.createTrianglePipeline(SolidMesh, true, true,
+    artist.depthFragmentShader)
+  artist.ssaoPipeline = artist.createPostProcessPipeline(
+      artist.ssaoFragmentShader)
+  artist.compositePipeline = artist.createPostProcessPipeline(
+    artist.compositeFragmentShader)
+  artist.depthPreviewPipeline = artist.createPostProcessPipeline(
+    artist.depthPreviewFragmentShader)
 
 proc installArtist3DRenderer*(renderer: Renderer) =
   defaultRenderer = renderer
@@ -1242,6 +1361,7 @@ proc activeCamera*(artist: Artist3DState): cameras.Camera =
 
 proc init*(T: typedesc[Artist3D], renderer: Renderer): T =
   new result.state
+  result.state.ssao = SsaoOptions.init()
   result.state.defaultModel = Model.init(DefaultMeshID)
   result.state[].initWithRenderer(renderer)
   result.state.activeCameraID = DefaultCameraID
@@ -1443,7 +1563,8 @@ proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   var depthTextureInfo = GPUTextureCreateInfo(
     `type`: GPU_TEXTURETYPE_2D,
     format: GPU_TEXTUREFORMAT_D16_UNORM,
-    usage: GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET.GPUTextureUsageFlags,
+    usage: (GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET or
+      GPU_TEXTUREUSAGE_SAMPLER).GPUTextureUsageFlags,
     width: width,
     height: height,
     layer_count_or_depth: 1,
@@ -1454,6 +1575,16 @@ proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   if artist.depthTexture.isNil:
     artist.releaseRenderTarget()
     raiseGpuError("Failed to create GPU depth target")
+
+  artist.ssaoTexture = createGPUTexture(artist.device, addr textureInfo)
+  artist.compositeTexture = createGPUTexture(artist.device, addr textureInfo)
+  artist.depthPreviewTexture = createGPUTexture(artist.device, addr textureInfo)
+  artist.depthDataTexture = createGPUTexture(artist.device, addr textureInfo)
+  if artist.ssaoTexture.isNil or artist.compositeTexture.isNil or
+      artist.depthDataTexture.isNil or
+      artist.depthPreviewTexture.isNil:
+    artist.releaseRenderTarget()
+    raiseGpuError("Failed to create GPU post-process target")
 
   let props = createProperties()
   if props == 0:
@@ -1468,31 +1599,39 @@ proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   discard setNumberProperty(
     props, PROP_TEXTURE_CREATE_ACCESS_NUMBER, TEXTUREACCESS_STATIC.int64
   )
-  discard setPointerProperty(
-    props, PropTextureCreateGpuTexture, cast[pointer](artist.colorTexture)
-  )
+  discard setPointerProperty(props, PropTextureCreateGpuTexture, cast[pointer](
+      artist.colorTexture))
   artist.renderTexture = createTextureWithProperties(artist.renderer, props)
-  if artist.renderTexture.isNil:
+  discard setPointerProperty(props, PropTextureCreateGpuTexture, cast[pointer](
+      artist.ssaoTexture))
+  artist.ssaoRenderTexture = createTextureWithProperties(artist.renderer, props)
+  discard setPointerProperty(props, PropTextureCreateGpuTexture, cast[pointer](
+      artist.compositeTexture))
+  artist.compositeRenderTexture = createTextureWithProperties(artist.renderer, props)
+  discard setPointerProperty(props, PropTextureCreateGpuTexture, cast[pointer](
+      artist.depthPreviewTexture))
+  artist.depthPreviewRenderTexture = createTextureWithProperties(
+      artist.renderer, props)
+  if artist.renderTexture.isNil or artist.ssaoRenderTexture.isNil or
+      artist.compositeRenderTexture.isNil or
+          artist.depthPreviewRenderTexture.isNil:
     artist.releaseRenderTarget()
-    raiseGpuError("Failed to wrap GPU color target as SDL texture")
+    raiseGpuError("Failed to wrap GPU target as SDL texture")
 
   artist.textureWidth = width
   artist.textureHeight = height
 
-proc ensureReady(artist: var Artist3DState) =
+proc ensureReady(artist: var Artist3DState, width, height: uint32) =
   if artist.device.isNil:
     if defaultRenderer.isNil:
       return
     artist.initWithRenderer(defaultRenderer)
-
-  var width, height: cint
-  if not getRenderOutputSize(artist.renderer, width, height):
-    raiseGpuError("Failed to get render output size")
-  if width <= 0 or height <= 0:
-    return
   if artist.colorTexture.isNil or artist.depthTexture.isNil or
-      artist.textureWidth != width.uint32 or artist.textureHeight != height.uint32:
-    artist.createRenderTarget(width.uint32, height.uint32)
+      artist.ssaoTexture.isNil or artist.compositeTexture.isNil or
+      artist.depthDataTexture.isNil or
+      artist.depthPreviewTexture.isNil or
+      artist.textureWidth != width or artist.textureHeight != height:
+    artist.createRenderTarget(width, height)
 
 proc `=destroy`*(artist: var Artist3D) =
   if not artist.state.isNil and not artist.state.device.isNil:
@@ -1570,6 +1709,27 @@ proc drawModel(
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
   drawGPUIndexedPrimitives(pass, mesh.indices.len.uint32, 1, 0, 0, 0)
 
+proc drawDepthModel(state: var Artist3DState, pass: GPURenderPass,
+    commandBuffer: GPUCommandBuffer, model: Model, extraTransform: Mat4) =
+  ## The hardware D16 attachment remains the visibility buffer. This pass
+  ## writes its linearized result to an RGBA target, which is reliable to
+  ## sample and inspect on every supported SDL GPU backend.
+  if model.renderOptions.effect != StandardEffect or not model.renderOptions.depthTest or
+      not state.meshes.hasKey(model.meshID) or state.depthPipeline.isNil:
+    return
+  let mesh = state.meshes[model.meshID]
+  if mesh.vertexBuffer.isNil or mesh.indexBuffer.isNil or mesh.indices.len == 0:
+    return
+  var binding = GpuBufferBinding(buffer: mesh.vertexBuffer, offset: 0)
+  var indexBinding = GpuBufferBinding(buffer: mesh.indexBuffer, offset: 0)
+  var uniforms = state.transformUniforms(extraTransform * model.transform)
+  pushGPUVertexUniformData(commandBuffer, CameraUniformSlot, addr uniforms,
+    sizeof(TransformUniforms).uint32)
+  bindGPUGraphicsPipeline(pass, state.depthPipeline)
+  bindGpuVertexBuffers(pass, 0, addr binding, 1)
+  bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
+  drawGPUIndexedPrimitives(pass, mesh.indices.len.uint32, 1, 0, 0, 0)
+
 proc drawSky(
     state: var Artist3DState,
     pass: GPURenderPass,
@@ -1599,12 +1759,54 @@ proc drawSky(
     bindGpuFragmentSamplers(pass, 0, addr samplerBinding, 1)
   drawGPUPrimitives(pass, 3, 1, 0, 0)
 
+proc drawPostProcess(state: var Artist3DState, pass: GPURenderPass,
+    commandBuffer: GPUCommandBuffer, pipeline: GPUGraphicsPipeline,
+    textures: openArray[GPUTexture], uniforms: pointer = nil,
+    uniformSize = 0'u32) =
+  if pipeline.isNil or textures.len == 0 or state.sampler.isNil:
+    return
+  var bindings: array[2, GpuTextureSamplerBinding]
+  for i, texture in textures:
+    bindings[i] = GpuTextureSamplerBinding(texture: texture,
+        sampler: state.sampler)
+  if uniforms != nil and uniformSize > 0:
+    pushGPUFragmentUniformData(commandBuffer, 0, uniforms, uniformSize)
+  bindGPUGraphicsPipeline(pass, pipeline)
+  bindGpuFragmentSamplers(pass, 0, addr bindings[0], textures.len.uint32)
+  drawGPUPrimitives(pass, 3, 1, 0, 0)
+
+proc runPostProcessPass(state: var Artist3DState,
+    commandBuffer: GPUCommandBuffer, output: GPUTexture, pipeline: GPUGraphicsPipeline,
+        inputs: openArray[GPUTexture],
+    uniforms: pointer = nil, uniformSize = 0'u32) =
+  var target = GpuColorTargetInfo(texture: output,
+    load_op: GPU_LOADOP_DONT_CARE, store_op: GPU_STOREOP_STORE)
+  let pass = beginGpuRenderPass(commandBuffer, addr target, 1, nil)
+  if pass.isNil:
+    raiseGpuError("Failed to begin GPU post-process pass")
+  state.drawPostProcess(pass, commandBuffer, pipeline, inputs, uniforms, uniformSize)
+  endGPURenderPass(pass)
+
 proc render*(artist: Artist3D, models: openArray[Model],
-    transform = identityMat4(), sky = SkyRenderOptions.init()) =
+    transform = identityMat4(), sky = SkyRenderOptions.init(),
+    canvas: ptr Canvas = nil) =
   if artist.state.isNil:
     return
   let state = artist.state
-  state[].ensureReady()
+  var destinationWidth, destinationHeight: int
+  if canvas != nil:
+    canvas[].syncSize()
+    destinationWidth = canvas[].width
+    destinationHeight = canvas[].height
+    state[].ensureReady(canvas[].renderWidth.uint32, canvas[].renderHeight.uint32)
+  else:
+    var width, height: cint
+    if not getRenderOutputSize(state.renderer, width, height) or width <= 0 or
+        height <= 0:
+      return
+    destinationWidth = width.int
+    destinationHeight = height.int
+    state[].ensureReady(width.uint32, height.uint32)
   for model in models:
     state[].uploadMesh(model.meshID)
     if model.renderOptions.materialID.len > 0:
@@ -1614,7 +1816,9 @@ proc render*(artist: Artist3D, models: openArray[Model],
   if state.device.isNil or state.solidPipeline.isNil or
       state.overlayPipeline.isNil or state.wireframePipeline.isNil or
       state.overlayWireframePipeline.isNil or state.waterPipeline.isNil or
-      state.skyPipeline.isNil or state.colorTexture.isNil:
+      state.skyPipeline.isNil or state.depthPipeline.isNil or state.ssaoPipeline.isNil or
+      state.compositePipeline.isNil or state.depthPreviewPipeline.isNil or
+      state.colorTexture.isNil:
     return
 
   discard flushRenderer(state.renderer)
@@ -1651,13 +1855,71 @@ proc render*(artist: Artist3D, models: openArray[Model],
       state[].drawModel(pass, commandBuffer, model, transform)
   endGPURenderPass(pass)
 
+  var ssaoUniforms = SsaoUniforms(
+    resolutionRadius: vec4(state.textureWidth.float32,
+      state.textureHeight.float32,
+      state.ssao.radius, 0),
+    projection: vec4(DefaultNearPlane, DefaultFarPlane, 0, 0),
+    strengthBias: vec4(state.ssao.strength, state.ssao.bias, 0, 0),
+  )
+  var depthColorTarget = GpuColorTargetInfo(texture: state.depthDataTexture,
+    # Packed representation of a depth value just below 1.0 (far plane).
+    clear_color: FColor(r: 0.75, g: 0.996, b: 0.996, a: 0.996), load_op: GPU_LOADOP_CLEAR,
+    store_op: GPU_STOREOP_STORE)
+  var depthOnlyTarget = GpuDepthStencilTargetInfo(texture: state.depthTexture,
+    clear_depth: 1.0, load_op: GPU_LOADOP_CLEAR, store_op: GPU_STOREOP_DONT_CARE,
+    stencil_load_op: GPU_LOADOP_DONT_CARE, stencil_store_op: GPU_STOREOP_DONT_CARE)
+  let depthPass = beginGpuRenderPass(commandBuffer, addr depthColorTarget, 1,
+    addr depthOnlyTarget)
+  if depthPass.isNil:
+    discard cancelGPUCommandBuffer(commandBuffer)
+    raiseGpuError("Failed to begin GPU depth-color pass")
+  for model in models:
+    state[].drawDepthModel(depthPass, commandBuffer, model, transform)
+  endGPURenderPass(depthPass)
+  state[].runPostProcessPass(commandBuffer, state.depthPreviewTexture,
+    state.depthPreviewPipeline, [state.depthDataTexture])
+  if state.ssao.enabled:
+    state[].runPostProcessPass(commandBuffer, state.ssaoTexture,
+      state.ssaoPipeline,
+      [state.depthDataTexture], addr ssaoUniforms, sizeof(SsaoUniforms).uint32)
+  else:
+    # The composite pass accepts white as an occlusion texture; this keeps the
+    # target graph stable while SSAO is switched off.
+    state[].runPostProcessPass(commandBuffer, state.ssaoTexture,
+      state.compositePipeline, [state.whiteTexture, state.whiteTexture])
+  state[].runPostProcessPass(commandBuffer, state.compositeTexture,
+    state.compositePipeline, [state.colorTexture, state.ssaoTexture])
+
   if not submitGPUCommandBuffer(commandBuffer):
     raiseGpuError("Failed to submit GPU command buffer")
 
   var dst =
-    FRect(x: 0, y: 0, w: state.textureWidth.cfloat,
-        h: state.textureHeight.cfloat)
-  discard renderTexture(state.renderer, state.renderTexture, nil, addr dst)
+    FRect(x: 0, y: 0, w: destinationWidth.cfloat,
+        h: destinationHeight.cfloat)
+  discard renderTexture(state.renderer, state.compositeRenderTexture, nil, addr dst)
+
+proc ssaoOptions*(artist: Artist3D): SsaoOptions =
+  if artist.state.isNil: return SsaoOptions.init(enabled = false)
+  artist.state.ssao
+
+proc `ssaoOptions=`*(artist: Artist3D, options: SsaoOptions) =
+  if artist.state.isNil: return
+  artist.state.ssao = SsaoOptions.init(options.enabled, options.radius,
+    options.strength, options.bias)
+
+proc renderTarget*(artist: Artist3D, target: RenderTarget): Texture =
+  ## SDL texture for a live render target; nil until the first render.
+  if artist.state.isNil: return nil
+  case target
+  of SceneColorTarget: artist.state.renderTexture
+  of DepthTarget: artist.state.depthPreviewRenderTexture
+  of AmbientOcclusionTarget: artist.state.ssaoRenderTexture
+  of CompositeTarget: artist.state.compositeRenderTexture
+
+proc renderTargetSize*(artist: Artist3D): tuple[width, height: int] =
+  if artist.state.isNil: return (0, 0)
+  (artist.state.textureWidth.int, artist.state.textureHeight.int)
 
 proc render*(artist: Artist3D, model: Model, transform = identityMat4()) =
   artist.render([model], transform)
