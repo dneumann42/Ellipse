@@ -24,6 +24,16 @@ type Vertex* = object
   splatIndices*, splatWeights*: Vec4
 
 type
+  MeshData* = object
+    ## CPU-side geometry accepted by `setMesh` and `createModel`.
+    vertices*: seq[Vertex]
+    indices*: seq[uint32]
+
+  UvRegion* = object
+    ## Normalized origin and size of a region within a texture atlas.
+    origin*, size*: Vec2
+
+type
   MeshID* = string
 
   MeshRenderMode* = enum
@@ -77,6 +87,7 @@ type
     depthWrite*: bool
     baseColor*: Vec3
     materialID*: string
+    uvRegion*: UvRegion
     fog*: FogRenderOptions
     water*: WaterRenderOptions
 
@@ -136,6 +147,7 @@ type
     diffuseStrength: float32
     specularColor: Vec3
     shininess: float32
+    uvRegion: Vec4
 
   WaterUniforms = object
     cameraPosition: Vec3
@@ -193,11 +205,13 @@ type
     whiteCubeTexture: GPUTexture
     skybox: GpuSkybox
     defaultModel: Model
-    colorTexture, depthTexture, depthDataTexture, ssaoTexture, compositeTexture,
-      depthPreviewTexture: GPUTexture
+    colorTexture, depthTexture, multisampleColorTexture,
+      multisampleDepthTexture, depthDataTexture, ssaoTexture,
+      compositeTexture, depthPreviewTexture: GPUTexture
     renderTexture, ssaoRenderTexture, compositeRenderTexture,
       depthPreviewRenderTexture: Texture
     textureWidth, textureHeight: uint32
+    sampleCount: GPUSampleCount
     ssao: SsaoOptions
     renderSettings: RenderSettings
     allCameras: Table[string, cameras.Camera]
@@ -393,6 +407,67 @@ proc identityMat4(): Mat4 =
   result[2, 2] = 1
   result[3, 3] = 1
 
+proc init*(T: typedesc[UvRegion], origin = vec2(0'f32, 0'f32),
+    size = vec2(1'f32, 1'f32)): T =
+  ## Creates a normalized texture region. The default selects the full texture.
+  T(origin: origin, size: size)
+
+proc atlasRegion*(columns, rows, column, row: int,
+    inset = vec2(0'f32, 0'f32)): UvRegion =
+  ## Selects one cell from a uniform atlas. `inset` is normalized within a cell.
+  if columns <= 0 or rows <= 0:
+    raise newException(ValueError, "atlas dimensions must be positive")
+  if column < 0 or column >= columns or row < 0 or row >= rows:
+    raise newException(ValueError, "atlas cell is outside the atlas")
+  let
+    cellSize = vec2(1'f32 / columns.float32, 1'f32 / rows.float32)
+    safeInset = vec2(
+      clamp(inset.x, 0'f32, 0.499'f32),
+      clamp(inset.y, 0'f32, 0.499'f32),
+    )
+  UvRegion(
+    origin: vec2(column.float32, row.float32) * cellSize +
+      safeInset * cellSize,
+    size: cellSize * (vec2(1'f32, 1'f32) - safeInset * 2'f32),
+  )
+
+proc atlasRegionPixels*(textureSize, origin, size: Vec2,
+    insetPixels = vec2(0'f32, 0'f32)): UvRegion =
+  ## Selects a pixel rectangle and optionally pulls its edges inward to avoid
+  ## sampling neighbouring atlas cells when texture filtering is enabled.
+  if textureSize.x <= 0 or textureSize.y <= 0 or size.x <= 0 or size.y <= 0:
+    raise newException(ValueError, "texture and region sizes must be positive")
+  let inset = vec2(
+    clamp(insetPixels.x, 0'f32, size.x * 0.499'f32),
+    clamp(insetPixels.y, 0'f32, size.y * 0.499'f32),
+  )
+  UvRegion(
+    origin: (origin + inset) / textureSize,
+    size: (size - inset * 2'f32) / textureSize,
+  )
+
+func remap*(region: UvRegion, uv: Vec2): Vec2 =
+  ## Maps mesh-local UV coordinates into a normalized atlas region.
+  region.origin + uv * region.size
+
+proc init*(T: typedesc[Material], id: string,
+    texture: TextureResourceHandle = nil,
+    baseColor = vec3(1'f32, 1'f32, 1'f32),
+    useTexture = true, textureSampling = Single,
+    atlasColumns = 1, atlasRows = 1,
+    specularStrength = DefaultSpecularStrength): T =
+  ## Creates a material with useful textured-model defaults.
+  T(
+    id: id,
+    texture: texture,
+    baseColor: baseColor,
+    useTexture: useTexture and texture != nil,
+    textureSampling: textureSampling,
+    atlasColumns: max(atlasColumns, 1),
+    atlasRows: max(atlasRows, 1),
+    specularStrength: max(specularStrength, 0'f32),
+  )
+
 proc init*(
     T: typedesc[WaterRenderOptions],
     time = 0'f32,
@@ -467,6 +542,7 @@ proc init*(
     depthWrite = true,
     baseColor = vec3(0.9'f32, 0.52'f32, 0.22'f32),
     materialID = "",
+    uvRegion = UvRegion.init(),
     fog = FogRenderOptions.init(),
 ): T =
   T(
@@ -476,6 +552,7 @@ proc init*(
     depthWrite: depthWrite,
     baseColor: baseColor,
     materialID: materialID,
+    uvRegion: uvRegion,
     fog: fog,
     water: WaterRenderOptions.init(),
   )
@@ -542,6 +619,11 @@ proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
   result.diffuseStrength = settings.lighting.diffuseStrength
   result.specularColor = settings.lighting.specularColor
   result.shininess = settings.lighting.shininess
+  var uvRegion = model.renderOptions.uvRegion
+  if uvRegion.size.x <= 0 or uvRegion.size.y <= 0:
+    uvRegion = UvRegion.init()
+  result.uvRegion = vec4(
+    uvRegion.origin.x, uvRegion.origin.y, uvRegion.size.x, uvRegion.size.y)
   if model.renderOptions.materialID.len > 0 and
       artist.materials.hasKey(model.renderOptions.materialID):
     let material = artist.materials[model.renderOptions.materialID].material
@@ -610,6 +692,12 @@ proc releaseRenderTarget(artist: var Artist3DState) =
   if not artist.depthTexture.isNil:
     releaseGPUTexture(artist.device, artist.depthTexture)
     artist.depthTexture = nil
+  if not artist.multisampleColorTexture.isNil:
+    releaseGPUTexture(artist.device, artist.multisampleColorTexture)
+    artist.multisampleColorTexture = nil
+  if not artist.multisampleDepthTexture.isNil:
+    releaseGPUTexture(artist.device, artist.multisampleDepthTexture)
+    artist.multisampleDepthTexture = nil
   if not artist.depthDataTexture.isNil:
     releaseGPUTexture(artist.device, artist.depthDataTexture)
     artist.depthDataTexture = nil
@@ -1081,6 +1169,7 @@ proc uploadMesh(artist: var Artist3DState, meshID: MeshID) =
 proc createTrianglePipeline(
     artist: var Artist3DState, mode: MeshRenderMode, depthTest, depthWrite: bool,
     fragmentShader: GPUShader = nil,
+    sampleCount = GPU_SAMPLECOUNT_1,
 ): GPUGraphicsPipeline =
   var vertexBuffers = [
     GPUVertexBufferDescription(
@@ -1167,7 +1256,7 @@ proc createTrianglePipeline(
       cull_mode: if mode == WireframeMesh: GPU_CULLMODE_NONE else: GPU_CULLMODE_BACK,
       front_face: GPU_FRONTFACE_CLOCKWISE,
     ),
-    multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    multisample_state: GPUMultisampleState(sample_count: sampleCount),
     depth_stencil_state: GPUDepthStencilState(
       compare_op: GPU_COMPAREOP_LESS_OR_EQUAL,
       enable_depth_test: depthTest,
@@ -1247,7 +1336,7 @@ proc createWaterPipeline(artist: var Artist3DState): GPUGraphicsPipeline =
       cull_mode: GPU_CULLMODE_NONE,
       front_face: GPU_FRONTFACE_CLOCKWISE,
     ),
-    multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    multisample_state: GPUMultisampleState(sample_count: artist.sampleCount),
     depth_stencil_state: GPUDepthStencilState(
       compare_op: GPU_COMPAREOP_LESS_OR_EQUAL,
       enable_depth_test: true,
@@ -1286,7 +1375,7 @@ proc createSkyPipeline(artist: var Artist3DState): GPUGraphicsPipeline =
       cull_mode: GPU_CULLMODE_NONE,
       front_face: GPU_FRONTFACE_CLOCKWISE,
     ),
-    multisample_state: GPUMultisampleState(sample_count: GPU_SAMPLECOUNT_1),
+    multisample_state: GPUMultisampleState(sample_count: artist.sampleCount),
     depth_stencil_state: GPUDepthStencilState(
       compare_op: GPU_COMPAREOP_ALWAYS,
       enable_depth_test: false,
@@ -1358,11 +1447,14 @@ proc createTrianglePipelines(artist: var Artist3DState) =
       "depthPreview.frag.spv", GPU_SHADERSTAGE_FRAGMENT, samplers = 1)
   artist.depthFragmentShader = createShader(artist.device, "depth.frag.spv",
       GPU_SHADERSTAGE_FRAGMENT)
-  artist.solidPipeline = artist.createTrianglePipeline(SolidMesh, true, true)
-  artist.overlayPipeline = artist.createTrianglePipeline(SolidMesh, false, false)
-  artist.wireframePipeline = artist.createTrianglePipeline(WireframeMesh, true, false)
+  artist.solidPipeline = artist.createTrianglePipeline(
+    SolidMesh, true, true, sampleCount = artist.sampleCount)
+  artist.overlayPipeline = artist.createTrianglePipeline(
+    SolidMesh, false, false, sampleCount = artist.sampleCount)
+  artist.wireframePipeline = artist.createTrianglePipeline(
+    WireframeMesh, true, false, sampleCount = artist.sampleCount)
   artist.overlayWireframePipeline = artist.createTrianglePipeline(
-    WireframeMesh, false, false
+    WireframeMesh, false, false, sampleCount = artist.sampleCount
   )
   artist.waterPipeline = artist.createWaterPipeline()
   artist.skyPipeline = artist.createSkyPipeline()
@@ -1402,6 +1494,7 @@ proc activeCamera*(artist: Artist3DState): cameras.Camera =
 proc init*(T: typedesc[Artist3D], renderer: Renderer): T =
   new result.state
   result.state.renderSettings = RenderSettings.init()
+  result.state.sampleCount = GPU_SAMPLECOUNT_1
   result.state.ssao = SsaoOptions.init(
     enabled = result.state.renderSettings.ssao.enabled,
     radius = result.state.renderSettings.ssao.radius,
@@ -1451,6 +1544,28 @@ proc setMesh*(
   mesh.verticesDirty = true
   mesh.indicesDirty = true
   artist.state.meshes[meshID] = mesh
+
+proc setMesh*(artist: Artist3D, meshID: MeshID, mesh: MeshData) =
+  ## Uploads a self-contained mesh description under a reusable identifier.
+  artist.setMesh(meshID, mesh.vertices, mesh.indices)
+
+proc setMesh*(artist: Artist3D, mesh: MeshData) =
+  artist.setMesh(DefaultMeshID, mesh)
+
+proc createModel*(artist: Artist3D, meshID: MeshID, mesh: MeshData,
+    materialID = "", transform = identityMat4(),
+    uvRegion = UvRegion.init()): Model =
+  ## Registers geometry and returns a render-ready model in one operation.
+  artist.setMesh(meshID, mesh)
+  Model.init(meshID, transform, RenderOptions.init(
+    materialID = materialID, uvRegion = uvRegion))
+
+proc model*(artist: Artist3D, meshID: MeshID, materialID = "",
+    transform = identityMat4(), uvRegion = UvRegion.init()): Model =
+  ## Creates another instance of geometry already registered with the artist.
+  discard artist
+  Model.init(meshID, transform, RenderOptions.init(
+    materialID = materialID, uvRegion = uvRegion))
 
 proc setMesh*(
     artist: Artist3D, vertices: openArray[Vertex], indices: openArray[uint32]
@@ -1546,6 +1661,11 @@ proc createPlaneMesh*(
       result.indices.add c
       result.indices.add d
 
+proc withUvRegion*(model: Model, region: UvRegion): Model =
+  ## Returns a copy of a model sampling the requested atlas region.
+  result = model
+  result.renderOptions.uvRegion = region
+
 proc defaultModel*(artist: Artist3D): Model =
   if artist.state.isNil:
     return Model.init(DefaultMeshID)
@@ -1597,6 +1717,20 @@ proc renderSettings*(artist: Artist3D): RenderSettings =
 proc `renderSettings=`*(artist: Artist3D, settings: RenderSettings) =
   if artist.state.isNil:
     return
+  let requestedSampleCount = case settings.antialiasing
+    of AntialiasingMode.Disabled: GPU_SAMPLECOUNT_1
+    of AntialiasingMode.Msaa2x: GPU_SAMPLECOUNT_2
+    of AntialiasingMode.Msaa4x: GPU_SAMPLECOUNT_4
+    of AntialiasingMode.Msaa8x: GPU_SAMPLECOUNT_8
+  var sampleCount = requestedSampleCount
+  if not artist.state.device.isNil:
+    while sampleCount > GPU_SAMPLECOUNT_1 and
+        (not gPUTextureSupportsSampleCount(artist.state.device,
+          GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, sampleCount) or
+         not gPUTextureSupportsSampleCount(artist.state.device,
+          GPU_TEXTUREFORMAT_D16_UNORM, sampleCount)):
+      sampleCount = GPUSampleCount(sampleCount.ord - 1)
+  let antialiasingChanged = sampleCount != artist.state.sampleCount
   artist.state.renderSettings = settings
   artist.state.ssao = SsaoOptions.init(
     enabled = settings.ssao.enabled,
@@ -1605,6 +1739,11 @@ proc `renderSettings=`*(artist: Artist3D, settings: RenderSettings) =
     bias = settings.ssao.bias,
   )
   artist.textureFiltering = settings.textureFiltering
+  if antialiasingChanged:
+    artist.state.sampleCount = sampleCount
+    artist.state[].releaseRenderTarget()
+    if not artist.state.device.isNil:
+      artist.state[].createTrianglePipelines()
 
 proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   artist.releaseRenderTarget()
@@ -1639,6 +1778,23 @@ proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   if artist.depthTexture.isNil:
     artist.releaseRenderTarget()
     raiseGpuError("Failed to create GPU depth target")
+
+  if artist.sampleCount != GPU_SAMPLECOUNT_1:
+    var multisampleColorInfo = textureInfo
+    multisampleColorInfo.usage = GPU_TEXTUREUSAGE_COLOR_TARGET.GPUTextureUsageFlags
+    multisampleColorInfo.sample_count = artist.sampleCount
+    artist.multisampleColorTexture = createGPUTexture(
+      artist.device, addr multisampleColorInfo)
+    var multisampleDepthInfo = depthTextureInfo
+    multisampleDepthInfo.usage =
+      GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET.GPUTextureUsageFlags
+    multisampleDepthInfo.sample_count = artist.sampleCount
+    artist.multisampleDepthTexture = createGPUTexture(
+      artist.device, addr multisampleDepthInfo)
+    if artist.multisampleColorTexture.isNil or
+        artist.multisampleDepthTexture.isNil:
+      artist.releaseRenderTarget()
+      raiseGpuError("Failed to create multisample GPU targets")
 
   artist.ssaoTexture = createGPUTexture(artist.device, addr textureInfo)
   artist.compositeTexture = createGPUTexture(artist.device, addr textureInfo)
@@ -1691,6 +1847,9 @@ proc ensureReady(artist: var Artist3DState, width, height: uint32) =
       return
     artist.initWithRenderer(defaultRenderer)
   if artist.colorTexture.isNil or artist.depthTexture.isNil or
+      (artist.sampleCount != GPU_SAMPLECOUNT_1 and
+       (artist.multisampleColorTexture.isNil or
+        artist.multisampleDepthTexture.isNil)) or
       artist.ssaoTexture.isNil or artist.compositeTexture.isNil or
       artist.depthDataTexture.isNil or
       artist.depthPreviewTexture.isNil or
@@ -1905,8 +2064,9 @@ proc render*(artist: Artist3D, models: openArray[Model],
   if commandBuffer.isNil:
     raiseGpuError("Failed to acquire GPU command buffer")
 
+  let multisampling = state.sampleCount != GPU_SAMPLECOUNT_1
   var colorTargetInfo = GpuColorTargetInfo(
-    texture: state.colorTexture,
+    texture: if multisampling: state.multisampleColorTexture else: state.colorTexture,
     clear_color: FColor(
       r: state.renderSettings.clearColor.x,
       g: state.renderSettings.clearColor.y,
@@ -1914,10 +2074,11 @@ proc render*(artist: Artist3D, models: openArray[Model],
       a: 1.0,
     ),
     load_op: GPU_LOADOP_CLEAR,
-    store_op: GPU_STOREOP_STORE,
+    store_op: if multisampling: GPU_STOREOP_RESOLVE else: GPU_STOREOP_STORE,
+    resolve_texture: if multisampling: state.colorTexture else: nil,
   )
   var depthTargetInfo = GpuDepthStencilTargetInfo(
-    texture: state.depthTexture,
+    texture: if multisampling: state.multisampleDepthTexture else: state.depthTexture,
     clear_depth: 1.0,
     load_op: GPU_LOADOP_CLEAR,
     store_op: GPU_STOREOP_DONT_CARE,

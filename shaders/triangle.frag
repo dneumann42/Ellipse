@@ -29,7 +29,12 @@ layout(set = 3, binding = 0) uniform Lighting {
   float uDiffuseStrength;
   vec3 uSpecularColor;
   float uShininess;
+  vec4 uUvRegion;
 };
+
+vec2 modelUv(vec2 uv) {
+  return uUvRegion.xy + uv * uUvRegion.zw;
+}
 
 float fogAmountForDistance(float distanceToCamera) {
   float limit = max(uFogLimit, 0.001);
@@ -57,7 +62,7 @@ vec3 splatSample() {
   vec4 weights = max(vSplatWeights, vec4(0.0));
   float total = dot(weights, vec4(1.0));
   if (total <= 0.0001) {
-    return texture(uTexture, vUv).rgb;
+    return texture(uTexture, modelUv(vUv)).rgb;
   }
   weights /= total;
   return atlasSample(vSplatIndices.x) * weights.x +
@@ -84,7 +89,7 @@ void main() {
   float specular = pow(max(dot(viewDirection, reflectDirection), 0.0),
     max(uShininess, 1.0));
   vec3 baseColor = uUseTexture > 0.5
-    ? (uSplat.x > 0.5 ? splatSample() : texture(uTexture, vUv).rgb)
+    ? (uSplat.x > 0.5 ? splatSample() : texture(uTexture, modelUv(vUv)).rgb)
     : uBaseColor;
   vec3 color = baseColor * (uAmbientStrength +
     uLightColor * diffuse * uDiffuseStrength) +

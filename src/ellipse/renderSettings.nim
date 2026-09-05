@@ -8,6 +8,9 @@ import vmath
 const RenderSettingsPath* = "render-settings.owl"
 
 type
+  AntialiasingMode* {.pure.} = enum
+    Disabled, Msaa2x, Msaa4x, Msaa8x
+
   EnvironmentSettings* = object
     fogNearColor*, fogFarColor*: Vec3
     fogDensity*, fogFalloff*, fogLimit*: float32
@@ -34,6 +37,7 @@ type
     camera*: CameraRenderSettings
     clearColor*: Vec3
     textureFiltering*: bool
+    antialiasing*: AntialiasingMode
 
   RenderSettingsLoader* = object
     path*: string
@@ -69,6 +73,7 @@ proc init*(T: typedesc[RenderSettings]): T =
       nearPlane: 0.1'f32, farPlane: 100'f32),
     clearColor: vec3(0.04'f32, 0.05'f32, 0.07'f32),
     textureFiltering: false,
+    antialiasing: AntialiasingMode.Disabled,
   )
 
 proc clampSettings(settings: var RenderSettings) =
@@ -114,6 +119,7 @@ proc toOwl*(settings: RenderSettings): Value =
     ("camera", settings.camera.toOwl()),
     ("clearColor", settings.clearColor.toOwl()),
     ("textureFiltering", settings.textureFiltering.toOwl()),
+    ("antialiasing", settings.antialiasing.toOwl()),
   ])
 
 proc fromOwl*(value: Value, settings: var RenderSettings) =

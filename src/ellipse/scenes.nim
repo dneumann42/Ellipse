@@ -129,7 +129,8 @@ proc handlePushed*(self: var SceneStack) =
     self.load.incl(p)
   self.save()
 
-proc handleLoads*(self: var SceneStack) =
+proc handleLoads*(self: var SceneStack): bool =
+  result = self.load.len > 0
   self.load.clear()
 
 proc handleUnloads*(self: var SceneStack) =

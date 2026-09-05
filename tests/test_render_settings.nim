@@ -13,11 +13,20 @@ test "render settings load through Owl data conversion":
   check settings.environment.fogLimit == 120'f32
   check settings.lighting.direction.y == 0.85'f32
   check settings.ssao.enabled
+  check settings.antialiasing == AntialiasingMode.Disabled
   let encoded = settings.toOwl()
   check encoded.kind == Record
   var decoded = RenderSettings.init()
   encoded.fromOwl(decoded)
   check decoded.camera.fieldOfView == settings.camera.fieldOfView
+  check decoded.antialiasing == settings.antialiasing
+
+test "antialiasing mode loads from project settings":
+  let path = getTempDir() / "ellipse-antialiasing-render-settings.owl"
+  writeFile(path, "antialiasing = \"Msaa4x\"\n")
+  defer: removeFile(path)
+
+  check loadRenderSettings(path).antialiasing == AntialiasingMode.Msaa4x
 
 test "partial settings preserve defaults":
   let path = getTempDir() / "ellipse-partial-render-settings.owl"
