@@ -17,14 +17,14 @@ proc init*(T: typedesc[Profile]): T =
   result = T(id: $genOid())
 
 proc toOwl*(p: Profile): owl.Value =
-  result = dictionary {
-    "id": toOwl p.id,
-    "name": toOwl p.name,
-    "lastWritten": toOwl p.lastWritten.utc.format(DateFormat)
-  }.toTable()
+  result = record([
+    ("id", toOwl p.id),
+    ("name", toOwl p.name),
+    ("lastWritten", toOwl p.lastWritten.utc.format(DateFormat)),
+  ])
 
 proc fromOwl*(v: owl.Value, p: var Profile) =
-  doAssert v.kind == Dictionary
+  doAssert v.kind == Record
   v.entries["id"].fromOwl(p.id)
   v.entries["name"].fromOwl(p.name)
 

@@ -4,12 +4,14 @@ import sdl3, sdl3_ttf, plugnim
 import chroma as chromaColors
 import nest except Event, update, draw
 import nest/[coords, input, screen]
+import nest/fallbackfonts
 
 export plugnim
 export nest except Event, update, draw
 
 import rendering/artist3D
 import rendering/canvas
+import renderSettings
 
 import aseprite
 import errors, scenes
@@ -49,6 +51,7 @@ type
     appname*, appversion*: string
     width* = 1280
     height* = 720
+    renderSettingsPath* = RenderSettingsPath
 
 const
   MaxDeltaTime = 0.25'f64
@@ -169,6 +172,15 @@ proc clearNestTextureCache() =
     nestCachedTexture = nil
   nestCachedTextureWidth = 0
   nestCachedTextureHeight = 0
+
+proc clearNestUi*(ui: var UI) =
+  ## Discard the current widget tree and both forms of cached UI rendering.
+  ## Scene transitions use this when the next scene has no UI of its own.
+  ui.reset()
+  ui.markAllDirty()
+  ui.requestRedrawAfter(0)
+  nestCachedDrawCommands.setLen(0)
+  clearNestTextureCache()
 
 proc setNestCanvas*(canvas: var Canvas) =
   nestCanvas = addr canvas
@@ -557,13 +569,29 @@ proc resolveNestFontPath(path: string): string =
     if fileExists(candidate):
       return candidate
 
+proc openNestFontIO(
+    src: IOStream, closeio: bool, ptsize: cfloat
+): sdl3_ttf.Font {.importc: "TTF_OpenFontIO", cdecl,
+    dynlib: sdl3_ttf.TtfLibName.}
+
+proc openNestFallbackFont(mono: bool, size: int): sdl3_ttf.Font =
+  let bytes = if mono: fallbackMonoFont else: fallbackSansFont
+  if bytes.len == 0:
+    return nil
+  let stream = ioFromConstMem(bytes[0].unsafeAddr, bytes.len.csize_t)
+  if stream == nil:
+    return nil
+  openNestFontIO(stream, true, size.cfloat)
+
 proc nestOpenFont(
     path: string, size: int, metrics: var screen.FontMetrics
 ): screen.Font {.nimcall.} =
   let resolved = resolveNestFontPath(path)
-  if resolved.len == 0:
-    return screen.Font(0)
-  let font = sdl3_ttf.openFont(cstring(resolved), size.cfloat)
+  let font =
+    if resolved.len > 0:
+      sdl3_ttf.openFont(cstring(resolved), size.cfloat)
+    else:
+      openNestFallbackFont(path == "nerd-monospace", size)
   if font == nil:
     return screen.Font(0)
   metrics.ascent = sdl3_ttf.getFontAscent(font)
@@ -1158,6 +1186,8 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
     var gui {.inject.} = createNest()
     plugnimSetWidgetTextCallback = pluginSetNestDynamicText
     var artist {.inject.} = Artist3D.init(app.renderer)
+    var renderSettingsLoader = RenderSettingsLoader.init(appConfig.renderSettingsPath)
+    artist.renderSettings = renderSettingsLoader.settings
     var inputs {.inject.} = InputMap.init()
     var resources {.inject.} = ellipseResources.newResourceManager(app.renderer)
 
@@ -1193,6 +1223,8 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
       benchCachedUiFrames = 0
       benchUiDueFrames = 0
       benchNestEveryFrameFrames = 0
+      lastRenderSettingsPoll = 0'u64
+      reportedRenderSettingsError = ""
 
     let autoScreenshotDelay = getEnv("ELLIPSE_SCREENSHOT_AFTER_MS")
     if autoScreenshotDelay.len > 0:
@@ -1273,6 +1305,19 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
       currentFrameDeltaSecondsValue = actualFrameDt
       previousTime = frameStart
       let dt {.inject.} = actualFrameDt
+      let renderSettingsNow = sdl3.getTicks()
+      if lastRenderSettingsPoll == 0 or
+          renderSettingsNow - lastRenderSettingsPoll >= 500:
+        lastRenderSettingsPoll = renderSettingsNow
+        if renderSettingsLoader.poll():
+          artist.renderSettings = renderSettingsLoader.settings
+          reportedRenderSettingsError = ""
+          requestFrameAfter(0)
+        elif renderSettingsLoader.lastError.len > 0 and
+            renderSettingsLoader.lastError != reportedRenderSettingsError:
+          debugEcho "Could not reload ", renderSettingsLoader.path, ": ",
+            renderSettingsLoader.lastError
+          reportedRenderSettingsError = renderSettingsLoader.lastError
       resources.poll()
       if gui.wantsTextInput():
         inputs.maskKeyboardInput()

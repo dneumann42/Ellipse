@@ -22,7 +22,13 @@ layout(set = 3, binding = 0) uniform Lighting {
   float uFogFalloff;
   float uFogLimit;
   float uSpecularStrength;
-  vec3 uLightingPadding0;
+  vec2 uLightingPadding0;
+  vec3 uLightDirection;
+  float uAmbientStrength;
+  vec3 uLightColor;
+  float uDiffuseStrength;
+  vec3 uSpecularColor;
+  float uShininess;
 };
 
 float fogAmountForDistance(float distanceToCamera) {
@@ -57,16 +63,19 @@ vec3 splatSample() {
 
 void main() {
   vec3 normal = normalize(vNormal);
-  vec3 lightDirection = normalize(vec3(-0.45, 0.85, -0.35));
+  vec3 lightDirection = normalize(uLightDirection);
   vec3 viewDirection = normalize(uCameraPosition - vWorldPosition);
   vec3 reflectDirection = reflect(-lightDirection, normal);
 
   float diffuse = max(dot(normal, lightDirection), 0.0);
-  float specular = pow(max(dot(viewDirection, reflectDirection), 0.0), 32.0);
+  float specular = pow(max(dot(viewDirection, reflectDirection), 0.0),
+    max(uShininess, 1.0));
   vec3 baseColor = uUseTexture > 0.5
     ? (uSplat.x > 0.5 ? splatSample() : texture(uTexture, vUv).rgb)
     : uBaseColor;
-  vec3 color = baseColor * (0.22 + diffuse * 0.72) + vec3(1.0, 0.9, 0.68) * specular * max(uSpecularStrength, 0.0);
+  vec3 color = baseColor * (uAmbientStrength +
+    uLightColor * diffuse * uDiffuseStrength) +
+    uSpecularColor * specular * max(uSpecularStrength, 0.0);
   float distanceToCamera = length(uCameraPosition - vWorldPosition);
   float fogAmount = fogAmountForDistance(distanceToCamera);
   vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);

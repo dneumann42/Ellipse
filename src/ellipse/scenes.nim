@@ -44,16 +44,16 @@ proc fromOwl(v: owl.Value, ids: var seq[SceneID]) =
     ids.add(id)
 
 proc toOwl*(sceneStack: SceneStack): owl.Value =
-  result = dictionary {
-    "load": sceneStack.load.toOwl(),
-    "push": sceneStack.push.toOwl(),
-    "goto": sceneStack.goto.toOwl(),
-    "unload": sceneStack.unload.toOwl(),
-    "stack": sceneStack.stack.toOwl(),
-  }.toTable()
+  result = record([
+    ("load", sceneStack.load.toOwl()),
+    ("push", sceneStack.push.toOwl()),
+    ("goto", sceneStack.goto.toOwl()),
+    ("unload", sceneStack.unload.toOwl()),
+    ("stack", sceneStack.stack.toOwl()),
+  ])
 
 proc fromOwl*(v: owl.Value, sceneStack: var SceneStack) =
-  doAssert v.kind == Dictionary
+  doAssert v.kind == Record
   v.entries["load"].fromOwl(sceneStack.load)
   v.entries["push"].fromOwl(sceneStack.push)
   v.entries["goto"].fromOwl(sceneStack.goto)
@@ -198,5 +198,10 @@ macro scene*(args: varargs[untyped]): untyped =
   for arg in head:
     call.add arg
   call.add transformed
-  result = call
+  let exportedSceneId = postfix(copyNimTree(head[0]), "*")
+  result = newStmtList(
+    call,
+    quote do:
+      const `exportedSceneId`: SceneID = `sceneId`
+  )
   

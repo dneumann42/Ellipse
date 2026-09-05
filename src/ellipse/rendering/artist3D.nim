@@ -5,6 +5,7 @@ import sdl3, vmath
 import cameras
 import canvas
 import ../errors
+import ../renderSettings
 import ../resources
 
 const
@@ -128,7 +129,13 @@ type
     fogFalloff: float32
     fogLimit: float32
     specularStrength: float32
-    lightingPadding0: Vec3
+    lightingPadding0: Vec2
+    lightDirection: Vec3
+    ambientStrength: float32
+    lightColor: Vec3
+    diffuseStrength: float32
+    specularColor: Vec3
+    shininess: float32
 
   WaterUniforms = object
     cameraPosition: Vec3
@@ -188,6 +195,7 @@ type
       depthPreviewRenderTexture: Texture
     textureWidth, textureHeight: uint32
     ssao: SsaoOptions
+    renderSettings: RenderSettings
     allCameras: Table[string, cameras.Camera]
     activeCameraID: string
 
@@ -482,8 +490,12 @@ proc viewProjection(artist: Artist3DState): Mat4 =
       1'f32
     else:
       artist.textureWidth.float32 / artist.textureHeight.float32
-  let projection =
-    forwardPerspective(DefaultFovY, aspect, DefaultNearPlane, DefaultFarPlane)
+  let projection = forwardPerspective(
+    artist.renderSettings.camera.fieldOfView,
+    aspect,
+    artist.renderSettings.camera.nearPlane,
+    artist.renderSettings.camera.farPlane,
+  )
   projection * artist.activeCamera.viewMatrix
 
 proc skyViewportScale(artist: Artist3DState): Vec4 =
@@ -492,7 +504,8 @@ proc skyViewportScale(artist: Artist3DState): Vec4 =
       1'f32
     else:
       artist.textureWidth.float32 / artist.textureHeight.float32
-  let tanHalfFov = tan(DefaultFovY * PI.float32 / 360'f32)
+  let tanHalfFov = tan(artist.renderSettings.camera.fieldOfView *
+    PI.float32 / 360'f32)
   vec4(tanHalfFov * aspect, tanHalfFov, 0, 0)
 
 proc transformUniforms(artist: Artist3DState,
@@ -501,14 +514,30 @@ proc transformUniforms(artist: Artist3DState,
   result.modelViewProjection = artist.viewProjection * modelTransform
 
 proc lightingUniforms(artist: Artist3DState, model: Model): LightingUniforms =
+  let settings = artist.renderSettings
   result.cameraPosition = artist.activeCamera.position
   result.baseColor = model.renderOptions.baseColor
-  result.fogNearColor = model.renderOptions.fog.nearColor
-  result.fogFarColor = model.renderOptions.fog.farColor
-  result.fogDensity = max(model.renderOptions.fog.density, 0'f32)
-  result.fogFalloff = max(model.renderOptions.fog.falloff, 0.001'f32)
-  result.fogLimit = max(model.renderOptions.fog.limit, 0.001'f32)
-  result.specularStrength = DefaultSpecularStrength
+  var fog = model.renderOptions.fog
+  if fog == FogRenderOptions.init():
+    fog = FogRenderOptions.init(
+      nearColor = settings.environment.fogNearColor,
+      farColor = settings.environment.fogFarColor,
+      density = settings.environment.fogDensity,
+      falloff = settings.environment.fogFalloff,
+      limit = settings.environment.fogLimit,
+    )
+  result.fogNearColor = fog.nearColor
+  result.fogFarColor = fog.farColor
+  result.fogDensity = max(fog.density, 0'f32)
+  result.fogFalloff = max(fog.falloff, 0.001'f32)
+  result.fogLimit = max(fog.limit, 0.001'f32)
+  result.specularStrength = settings.lighting.defaultSpecularStrength
+  result.lightDirection = settings.lighting.direction
+  result.ambientStrength = settings.lighting.ambientStrength
+  result.lightColor = settings.lighting.color
+  result.diffuseStrength = settings.lighting.diffuseStrength
+  result.specularColor = settings.lighting.specularColor
+  result.shininess = settings.lighting.shininess
   if model.renderOptions.materialID.len > 0 and
       artist.materials.hasKey(model.renderOptions.materialID):
     let material = artist.materials[model.renderOptions.materialID].material
@@ -1361,7 +1390,14 @@ proc activeCamera*(artist: Artist3DState): cameras.Camera =
 
 proc init*(T: typedesc[Artist3D], renderer: Renderer): T =
   new result.state
-  result.state.ssao = SsaoOptions.init()
+  result.state.renderSettings = RenderSettings.init()
+  result.state.ssao = SsaoOptions.init(
+    enabled = result.state.renderSettings.ssao.enabled,
+    radius = result.state.renderSettings.ssao.radius,
+    strength = result.state.renderSettings.ssao.strength,
+    bias = result.state.renderSettings.ssao.bias,
+  )
+  result.state.textureFiltering = result.state.renderSettings.textureFiltering
   result.state.defaultModel = Model.init(DefaultMeshID)
   result.state[].initWithRenderer(renderer)
   result.state.activeCameraID = DefaultCameraID
@@ -1541,6 +1577,23 @@ proc `textureFiltering=`*(artist: Artist3D, filtering: bool) =
     artist.state.sampler = nil
     artist.state.samplerReady = false
     artist.state[].ensureSampler()
+
+proc renderSettings*(artist: Artist3D): RenderSettings =
+  if artist.state.isNil:
+    return RenderSettings.init()
+  artist.state.renderSettings
+
+proc `renderSettings=`*(artist: Artist3D, settings: RenderSettings) =
+  if artist.state.isNil:
+    return
+  artist.state.renderSettings = settings
+  artist.state.ssao = SsaoOptions.init(
+    enabled = settings.ssao.enabled,
+    radius = settings.ssao.radius,
+    strength = settings.ssao.strength,
+    bias = settings.ssao.bias,
+  )
+  artist.textureFiltering = settings.textureFiltering
 
 proc createRenderTarget(artist: var Artist3DState, width, height: uint32) =
   artist.releaseRenderTarget()
@@ -1793,6 +1846,14 @@ proc render*(artist: Artist3D, models: openArray[Model],
   if artist.state.isNil:
     return
   let state = artist.state
+  var activeSky = sky
+  if sky == SkyRenderOptions.init():
+    activeSky = SkyRenderOptions.init(
+      horizonColor = state.renderSettings.environment.skyHorizonColor,
+      zenithColor = state.renderSettings.environment.skyZenithColor,
+      groundColor = state.renderSettings.environment.skyGroundColor,
+      exposure = state.renderSettings.environment.skyExposure,
+    )
   var destinationWidth, destinationHeight: int
   if canvas != nil:
     canvas[].syncSize()
@@ -1811,8 +1872,8 @@ proc render*(artist: Artist3D, models: openArray[Model],
     state[].uploadMesh(model.meshID)
     if model.renderOptions.materialID.len > 0:
       state[].uploadMaterialTexture(model.renderOptions.materialID)
-  if sky.useSkybox and sky.skybox != nil:
-    state[].uploadSkyboxTexture(sky.skybox)
+  if activeSky.useSkybox and activeSky.skybox != nil:
+    state[].uploadSkyboxTexture(activeSky.skybox)
   if state.device.isNil or state.solidPipeline.isNil or
       state.overlayPipeline.isNil or state.wireframePipeline.isNil or
       state.overlayWireframePipeline.isNil or state.waterPipeline.isNil or
@@ -1828,7 +1889,12 @@ proc render*(artist: Artist3D, models: openArray[Model],
 
   var colorTargetInfo = GpuColorTargetInfo(
     texture: state.colorTexture,
-    clear_color: FColor(r: 0.04, g: 0.05, b: 0.07, a: 1.0),
+    clear_color: FColor(
+      r: state.renderSettings.clearColor.x,
+      g: state.renderSettings.clearColor.y,
+      b: state.renderSettings.clearColor.z,
+      a: 1.0,
+    ),
     load_op: GPU_LOADOP_CLEAR,
     store_op: GPU_STOREOP_STORE,
   )
@@ -1846,7 +1912,7 @@ proc render*(artist: Artist3D, models: openArray[Model],
     discard cancelGPUCommandBuffer(commandBuffer)
     raiseGpuError("Failed to begin GPU render pass")
 
-  state[].drawSky(pass, commandBuffer, sky)
+  state[].drawSky(pass, commandBuffer, activeSky)
   for model in models:
     if model.renderOptions.depthTest:
       state[].drawModel(pass, commandBuffer, model, transform)
@@ -1859,7 +1925,8 @@ proc render*(artist: Artist3D, models: openArray[Model],
     resolutionRadius: vec4(state.textureWidth.float32,
       state.textureHeight.float32,
       state.ssao.radius, 0),
-    projection: vec4(DefaultNearPlane, DefaultFarPlane, 0, 0),
+    projection: vec4(state.renderSettings.camera.nearPlane,
+      state.renderSettings.camera.farPlane, 0, 0),
     strengthBias: vec4(state.ssao.strength, state.ssao.bias, 0, 0),
   )
   var depthColorTarget = GpuColorTargetInfo(texture: state.depthDataTexture,

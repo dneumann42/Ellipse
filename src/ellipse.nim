@@ -19,8 +19,26 @@ export inputs
 import ellipse/resources
 export resources
 
+import ellipse/renderSettings
+export renderSettings
+
 import ellipse/scenes
 export scenes
+
+import ellipse/worlds/worlds
+export worlds
+
+import ellipse/worlds/registry
+export registry
+
+import ellipse/editing/editors
+export editors
+
+import ellipse/editing/worldMeshEditing
+export worldMeshEditing
+
+import ellipse/editing/inputs
+export inputs
 
 import plugnim
 export plugnim

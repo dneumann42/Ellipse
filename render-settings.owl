@@ -1,0 +1,61 @@
+environment = {}:
+  fogNearColor = []:
+    0.72
+    0.8
+    0.86
+  fogFarColor = []:
+    0.42
+    0.56
+    0.66
+  fogDensity = 0
+  fogFalloff = 1
+  fogLimit = 120
+  skyHorizonColor = []:
+    0.72
+    0.8
+    0.86
+  skyZenithColor = []:
+    0.42
+    0.56
+    0.66
+  skyGroundColor = []:
+    0.45
+    0.5
+    0.48
+  skyExposure = 1
+
+lighting = {}:
+  direction = []:
+    -0.45
+    0.85
+    -0.35
+  color = []:
+    1
+    1
+    1
+  ambientStrength = 0.22
+  diffuseStrength = 0.72
+  specularColor = []:
+    1
+    0.9
+    0.68
+  shininess = 32
+  defaultSpecularStrength = 0.35
+
+ssao = {}:
+  enabled = true
+  radius = 3.2
+  strength = 1.15
+  bias = 0.012
+
+camera = {}:
+  fieldOfView = 70
+  nearPlane = 0.1
+  farPlane = 100
+
+clearColor = []:
+  0.04
+  0.05
+  0.07
+
+textureFiltering = false
