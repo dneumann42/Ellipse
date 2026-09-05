@@ -1,7 +1,29 @@
 ## Lightweight render surfaces. Fixed canvases render at a permanent logical
 ## resolution and are letterboxed when presented.
 
+import std/os
+
 import sdl3
+
+proc imgSavePng(surface: ptr Surface, file: cstring): bool {.
+  importc: "IMG_SavePNG", cdecl, dynlib: "libSDL3_image.so"
+.}
+
+proc dumpRendererScreenshot*(renderer: Renderer,
+    path: string): bool {.discardable.} =
+  ## Save the renderer's current output as a PNG image.
+  if renderer == nil or path.len == 0:
+    return false
+  createDir(path.parentDir)
+  let surface = renderReadPixels(renderer, nil)
+  if surface == nil:
+    debugEcho "Failed to read renderer pixels for screenshot: ", $sdl3.getError()
+    return false
+  defer:
+    destroySurface(surface)
+  result = imgSavePng(surface, cstring(path))
+  if not result:
+    debugEcho "Failed to save screenshot ", path, ": ", $sdl3.getError()
 
 type
   CanvasSize* = enum

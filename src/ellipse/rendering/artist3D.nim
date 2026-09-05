@@ -162,6 +162,10 @@ type
     zenithUseSkybox: Vec4
     groundColor: Vec4
 
+  DepthFogUniforms = object
+    cameraPosition: Vec3
+    fogLimit: float32
+
   SsaoUniforms = object
     resolutionRadius: Vec4
     projection: Vec4
@@ -1125,10 +1129,17 @@ proc createTrianglePipeline(
   var colorTarget = GPUColorTargetDescription(
     format: GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
     blend_state: GPUColorTargetBlendState(
+      src_color_blendfactor: GPU_BLENDFACTOR_SRC_ALPHA,
+      dst_color_blendfactor: GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+      color_blend_op: GPU_BLENDOP_ADD,
+      src_alpha_blendfactor: GPU_BLENDFACTOR_ONE,
+      dst_alpha_blendfactor: GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+      alpha_blend_op: GPU_BLENDOP_ADD,
       color_write_mask: (
         GPU_COLORCOMPONENT_R or GPU_COLORCOMPONENT_G or GPU_COLORCOMPONENT_B or
         GPU_COLORCOMPONENT_A
     ).GPUColorComponentFlags,
+    enable_blend: true,
     enable_color_write_mask: true,
   ),
   )
@@ -1776,8 +1787,15 @@ proc drawDepthModel(state: var Artist3DState, pass: GPURenderPass,
   var binding = GpuBufferBinding(buffer: mesh.vertexBuffer, offset: 0)
   var indexBinding = GpuBufferBinding(buffer: mesh.indexBuffer, offset: 0)
   var uniforms = state.transformUniforms(extraTransform * model.transform)
+  let lighting = state.lightingUniforms(model)
+  var depthFog = DepthFogUniforms(
+    cameraPosition: lighting.cameraPosition,
+    fogLimit: lighting.fogLimit,
+  )
   pushGPUVertexUniformData(commandBuffer, CameraUniformSlot, addr uniforms,
     sizeof(TransformUniforms).uint32)
+  pushGPUFragmentUniformData(commandBuffer, 0, addr depthFog,
+    sizeof(DepthFogUniforms).uint32)
   bindGPUGraphicsPipeline(pass, state.depthPipeline)
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)

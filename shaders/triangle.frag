@@ -39,6 +39,11 @@ float fogAmountForDistance(float distanceToCamera) {
   return max(softFog, cutoffFog);
 }
 
+float fogVisibilityForDistance(float distanceToCamera) {
+  float limit = max(uFogLimit, 0.001);
+  return 1.0 - smoothstep(limit * 0.82, limit, distanceToCamera);
+}
+
 vec3 atlasSample(float tileIndex) {
   float columns = max(uSplat.y, 1.0);
   float rows = max(uSplat.z, 1.0);
@@ -62,6 +67,14 @@ vec3 splatSample() {
 }
 
 void main() {
+  float distanceToCamera = length(uCameraPosition - vWorldPosition);
+  // Fade fragment coverage through the terminal fog band so the already-
+  // rendered sky appears smoothly instead of being exposed by a hard slice.
+  float fogVisibility = fogVisibilityForDistance(distanceToCamera);
+  if (fogVisibility <= 0.001) {
+    discard;
+  }
+
   vec3 normal = normalize(vNormal);
   vec3 lightDirection = normalize(uLightDirection);
   vec3 viewDirection = normalize(uCameraPosition - vWorldPosition);
@@ -76,8 +89,7 @@ void main() {
   vec3 color = baseColor * (uAmbientStrength +
     uLightColor * diffuse * uDiffuseStrength) +
     uSpecularColor * specular * max(uSpecularStrength, 0.0);
-  float distanceToCamera = length(uCameraPosition - vWorldPosition);
   float fogAmount = fogAmountForDistance(distanceToCamera);
   vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);
-  outColor = vec4(mix(color, fogColor, fogAmount), 1.0);
+  outColor = vec4(mix(color, fogColor, fogAmount), fogVisibility);
 }

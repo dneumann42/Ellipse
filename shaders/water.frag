@@ -34,6 +34,11 @@ float fogAmountForDistance(float distanceToCamera) {
   return max(softFog, cutoffFog);
 }
 
+float fogVisibilityForDistance(float distanceToCamera) {
+  float limit = max(uFogLimit, 0.001);
+  return 1.0 - smoothstep(limit * 0.82, limit, distanceToCamera);
+}
+
 float hash21(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
@@ -85,6 +90,12 @@ vec3 waterNormal(vec2 p) {
 }
 
 void main() {
+  float distanceToCamera = length(uCameraPosition - vWorldPosition);
+  float fogVisibility = fogVisibilityForDistance(distanceToCamera);
+  if (fogVisibility <= 0.001) {
+    discard;
+  }
+
   vec3 normal = waterNormal(vWorldPosition.xz);
   vec3 lightDirection = normalize(vec3(-0.45, 0.85, -0.35));
   vec3 viewDirection = normalize(uCameraPosition - vWorldPosition);
@@ -108,10 +119,9 @@ void main() {
   color *= 0.55 + diffuse * 0.45;
   color += vec3(0.70, 0.92, 1.0) * broadSpecular * uSpecularStrength * 0.24;
   color += vec3(0.88, 0.97, 1.0) * (specular + foam * 0.11);
-  float distanceToCamera = length(uCameraPosition - vWorldPosition);
   float fogAmount = fogAmountForDistance(distanceToCamera);
   vec3 fogColor = mix(uFogNearColor, uFogFarColor, fogAmount);
   color = mix(color, fogColor, fogAmount);
-  float alpha = mix(clamp(uOpacity, 0.0, 1.0), 1.0, fogAmount);
+  float alpha = clamp(uOpacity, 0.0, 1.0) * fogVisibility;
   outColor = vec4(color, alpha);
 }
