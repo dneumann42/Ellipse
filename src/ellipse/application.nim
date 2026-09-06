@@ -338,6 +338,7 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
 
       let frame = loopState.beginFrame()
       let dt {.inject.} = frame.dt
+      inputs.advanceTime(dt)
       loopState.pollRenderSettings(renderSettingsLoader, artist)
       resources.poll()
       if gui.wantsTextInput():

@@ -4,6 +4,7 @@
 import std/os
 
 import sdl3
+import ../resources
 
 proc imgSavePng(surface: ptr Surface, file: cstring): bool {.
   importc: "IMG_SavePNG", cdecl, dynlib: "libSDL3_image.so"
@@ -29,8 +30,7 @@ type
   CanvasSize* = enum
     Fixed, Window
 
-  CanvasFilter* = enum
-    Nearest, Linear
+  CanvasFilter* = TextureFilter
 
   Canvas* = object
     sizeMode*: CanvasSize

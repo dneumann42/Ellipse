@@ -200,6 +200,8 @@ type
     materials: Table[string, GpuMaterial]
     sampler: pointer
     samplerReady: bool
+    nearestSampler, linearSampler: pointer
+    nearestSamplerReady, linearSamplerReady: bool
     textureFiltering*: bool
     whiteTexture: GPUTexture
     whiteCubeTexture: GPUTexture
@@ -747,6 +749,14 @@ proc releaseMaterials(artist: var Artist3DState) =
     releaseGpuSampler(artist.device, artist.sampler)
     artist.sampler = nil
     artist.samplerReady = false
+  if artist.nearestSamplerReady:
+    releaseGpuSampler(artist.device, artist.nearestSampler)
+    artist.nearestSampler = nil
+    artist.nearestSamplerReady = false
+  if artist.linearSamplerReady:
+    releaseGpuSampler(artist.device, artist.linearSampler)
+    artist.linearSampler = nil
+    artist.linearSamplerReady = false
 
 proc releasePipelines(artist: var Artist3DState) =
   if not artist.solidPipeline.isNil:
@@ -996,6 +1006,35 @@ proc ensureSampler(artist: var Artist3DState) =
   if artist.sampler.isNil:
     raiseGpuError("Failed to create GPU sampler")
   artist.samplerReady = true
+
+proc ensureTextureSampler(artist: var Artist3DState, filter: TextureFilter) =
+  if artist.device.isNil:
+    return
+  let ready = if filter == Nearest:
+    artist.nearestSamplerReady else: artist.linearSamplerReady
+  if ready:
+    return
+  let mode = if filter == Nearest: GPU_FILTER_NEAREST else: GPU_FILTER_LINEAR
+  let mipmapMode = if filter == Nearest:
+    GPU_SAMPLERMIPMAPMODE_NEAREST else: GPU_SAMPLERMIPMAPMODE_LINEAR
+  var samplerInfo = GPUSamplerCreateInfo(
+    min_filter: mode, mag_filter: mode, mipmap_mode: mipmapMode,
+    address_mode_u: GPU_SAMPLERADDRESSMODE_REPEAT,
+    address_mode_v: GPU_SAMPLERADDRESSMODE_REPEAT,
+    address_mode_w: GPU_SAMPLERADDRESSMODE_REPEAT,
+  )
+  let sampler = createGpuSampler(artist.device, addr samplerInfo)
+  if sampler.isNil:
+    raiseGpuError("Failed to create texture sampler")
+  if filter == Nearest:
+    artist.nearestSampler = sampler
+    artist.nearestSamplerReady = true
+  else:
+    artist.linearSampler = sampler
+    artist.linearSamplerReady = true
+
+proc textureSampler(artist: Artist3DState, filter: TextureFilter): pointer =
+  if filter == Nearest: artist.nearestSampler else: artist.linearSampler
 
 proc ensureWhiteTexture(artist: var Artist3DState) =
   if artist.device.isNil or artist.whiteTexture != nil:
@@ -1478,6 +1517,8 @@ proc initWithRenderer(artist: var Artist3DState, renderer: Renderer) =
   if artist.device.isNil:
     raiseGpuError("SDL renderer is not the GPU renderer")
   artist.ensureSampler()
+  artist.ensureTextureSampler(Nearest)
+  artist.ensureTextureSampler(Linear)
   artist.ensureWhiteTexture()
   artist.ensureWhiteCubeTexture()
   artist.createTrianglePipelines()
@@ -1903,12 +1944,18 @@ proc drawModel(
     let material = state.materials[model.renderOptions.materialID]
     if material.texture != nil:
       texture = material.texture
+  var sampler = state.sampler
+  if model.renderOptions.materialID.len > 0 and
+      state.materials.hasKey(model.renderOptions.materialID):
+    let source = state.materials[model.renderOptions.materialID].material.texture
+    if source != nil:
+      sampler = state.textureSampler(source.filterMode)
   var samplerBinding = GpuTextureSamplerBinding(
     texture: texture,
-    sampler: state.sampler,
+    sampler: sampler,
   )
   if model.renderOptions.effect == StandardEffect and
-      (texture.isNil or state.sampler.isNil):
+      (texture.isNil or sampler.isNil):
     raiseGpuError("Missing GPU texture sampler binding")
   pushGPUVertexUniformData(
     commandBuffer, CameraUniformSlot, addr uniforms, sizeof(
@@ -1926,7 +1973,7 @@ proc drawModel(
     )
   bindGPUGraphicsPipeline(pass, pipeline)
   if model.renderOptions.effect in {StandardEffect, WaterEffect} and
-      state.samplerReady and texture != nil:
+      sampler != nil and texture != nil:
     bindGpuFragmentSamplers(pass, 0, addr samplerBinding, 1)
   bindGpuVertexBuffers(pass, 0, addr binding, 1)
   bindGpuIndexBuffer(pass, addr indexBinding, GPU_INDEXELEMENTSIZE_32BIT)
@@ -2049,6 +2096,10 @@ proc render*(artist: Artist3D, models: openArray[Model],
     state[].uploadMesh(model.meshID)
     if model.renderOptions.materialID.len > 0:
       state[].uploadMaterialTexture(model.renderOptions.materialID)
+      if state[].materials.hasKey(model.renderOptions.materialID):
+        let source = state[].materials[model.renderOptions.materialID].material.texture
+        if source != nil:
+          state[].ensureTextureSampler(source.filterMode)
   if activeSky.useSkybox and activeSky.skybox != nil:
     state[].uploadSkyboxTexture(activeSky.skybox)
   if state.device.isNil or state.solidPipeline.isNil or

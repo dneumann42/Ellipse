@@ -24,10 +24,15 @@ type
   InputButtonState* = object
     down*, pressed*, released*: bool
 
+  DoubleClickState = object
+    waiting: bool
+    elapsed: float64
+
   InputMap* = object
     bindings: Table[InputId, seq[InputSource]]
     sourceDown: Table[InputSource, bool]
     states: Table[InputId, InputButtonState]
+    doubleClicks: Table[InputId, DoubleClickState]
     textInput, textEditing: string
     mouseX*, mouseY*: int
     mouseDeltaX*, mouseDeltaY*: float32
@@ -73,6 +78,8 @@ proc init*(T: typedesc[InputMap]): T =
     sourceDown: initTable[InputSource, bool](),
     states: initTable[InputId, InputButtonState](),
   )
+
+const DefaultDoubleClickInterval* = 0.35
 
 proc clearBindings*(inputs: var InputMap) =
   inputs.bindings.clear()
@@ -203,6 +210,25 @@ proc finishFrame*(inputs: var InputMap) =
   inputs.mouseDeltaY = 0
   inputs.mouseWheelX = 0
   inputs.mouseWheelY = 0
+
+proc advanceTime*(inputs: var InputMap, dt: float64) =
+  ## Advances gesture timers. Call once per frame before querying gestures.
+  for state in inputs.doubleClicks.mvalues:
+    if state.waiting:
+      state.elapsed += max(dt, 0.0)
+
+proc doubleClicked*(inputs: var InputMap, id: InputId,
+    interval = DefaultDoubleClickInterval): bool =
+  ## True on the second press of an action within `interval` seconds.
+  ## The interval is supplied per query so different actions can use the
+  ## timing that fits their interaction without maintaining separate maps.
+  if not inputs.states.getOrDefault(id).pressed:
+    return false
+  var state = inputs.doubleClicks.getOrDefault(id)
+  result = state.waiting and state.elapsed <= max(interval, 0.0)
+  state.waiting = not result
+  state.elapsed = 0.0
+  inputs.doubleClicks[id] = state
 
 proc down*(inputs: InputMap, id: InputId): bool =
   inputs.states.getOrDefault(id).down
