@@ -176,3 +176,7 @@ proc poll*(loader: var RenderSettingsLoader): bool =
     return false
   loader.watcher.refresh()
   result = loader.reload()
+
+proc close*(loader: var RenderSettingsLoader) =
+  ## Release resources held by the shared Owl file watcher.
+  loader.watcher.close()

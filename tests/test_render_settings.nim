@@ -46,6 +46,7 @@ test "hot reload retains the last valid settings":
   writeFile(path, "clearColor = []:\n  0.1\n  0.2\n  0.3\n")
   defer: removeFile(path)
   var loader = RenderSettingsLoader.init(path)
+  defer: loader.close()
   check loader.settings.clearColor.x == 0.1'f32
 
   writeFile(path, "eval-source \"1\"")

@@ -36,7 +36,7 @@ type
     firstFrame: bool
     blockedMouseButtons: array[256, bool]
     screenshotRequested: bool
-    autoScreenshotAt, lastRenderSettingsPoll: uint64
+    autoScreenshotAt: uint64
     screenshotFrames: seq[int]
     reportedRenderSettingsError: string
     benchmark: BenchmarkState
@@ -155,11 +155,6 @@ proc beginFrame(state: var LoopState): tuple[started: uint64, dt: float64] =
 
 proc pollRenderSettings(state: var LoopState, loader: var RenderSettingsLoader,
     artist: Artist3D) =
-  let now = sdl3.getTicks()
-  if state.lastRenderSettingsPoll != 0 and
-      now - state.lastRenderSettingsPoll < 500:
-    return
-  state.lastRenderSettingsPoll = now
   if loader.poll():
     artist.renderSettings = loader.settings
     state.reportedRenderSettingsError = ""
@@ -272,6 +267,7 @@ template buildApplication*(appConfig: ApplicationConfig, blk: untyped) =
     installNestPluginCallbacks()
     var artist {.inject.} = Artist3D.init(app.renderer)
     var renderSettingsLoader = RenderSettingsLoader.init(appConfig.renderSettingsPath)
+    defer: renderSettingsLoader.close()
     artist.renderSettings = renderSettingsLoader.settings
     var inputs {.inject.} = InputMap.init()
     var resources {.inject.} = ellipseResources.newResourceManager(app.renderer)
