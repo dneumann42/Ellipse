@@ -6,6 +6,14 @@ htmldocs/
 nimble.develop
 nimble.paths
 nimbledeps
+/deps/
+/nim.cfg
+/deps.dot
+/build/
 *.spv
 /ellipse
 *.out
+
+# Test executables sit beside their Nim sources.
+/tests/test*
+!/tests/test*.nim
