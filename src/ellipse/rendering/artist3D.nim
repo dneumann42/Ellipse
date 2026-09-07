@@ -360,9 +360,13 @@ proc raiseGpuError(context: string) {.noreturn.} =
   raise SDLException.newException(context & ": " & $sdl3.getError())
 
 proc shaderPath(name: string): string =
-  currentSourcePath().parentDir.parentDir.parentDir.parentDir / "build" /
-      "shaders" /
-    name
+  let packagedPath = getAppDir() / "shaders" / name
+  if packagedPath.fileExists:
+    packagedPath
+  else:
+    currentSourcePath().parentDir.parentDir.parentDir.parentDir / "build" /
+        "shaders" /
+        name
 
 proc loadShaderCode(name: string): string =
   let path = shaderPath(name)
