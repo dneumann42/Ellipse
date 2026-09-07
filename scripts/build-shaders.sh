@@ -23,6 +23,7 @@ fi
 if [[ "$mode" == dxil ]]; then
   spirv_cross="${SPIRV_CROSS:-$(command -v spirv-cross || true)}"
   dxc="${DXC:-$(command -v dxc || true)}"
+  dxil_validator_version="${DXIL_VALIDATOR_VERSION:-1.0}"
   if [[ -z "$spirv_cross" || -z "$dxc" ]]; then
     echo "error: spirv-cross and dxc are required for DXIL shaders" >&2
     exit 1
@@ -48,6 +49,12 @@ for shader in "$project_root"/shaders/*.vert "$project_root"/shaders/*.frag; do
     else
       profile=ps_6_0
     fi
-    "$dxc" -T "$profile" -E main "$hlsl" -Fo "$output_dir/$name.dxil"
+    # SDL's D3D12 backend checks shader-model support, but Windows validates
+    # the DXIL container later, while creating the graphics pipeline. Keep the
+    # validator contract at the shader-model-6.0 baseline so shaders produced
+    # by a newer DXC also load on older Windows DXIL validators.
+    "$dxc" -T "$profile" -E main \
+      -validator-version "$dxil_validator_version" \
+      "$hlsl" -Fo "$output_dir/$name.dxil"
   fi
 done
