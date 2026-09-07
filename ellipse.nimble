@@ -7,7 +7,7 @@ license = "Proprietary"
 srcDir = "src"
 bin = @["ellipse"]
 installExt = @["nim"]
-installDirs = @["shaders"]
+installDirs = @["shaders", "scripts"]
 
 # Dependencies
 
@@ -22,15 +22,4 @@ requires "https://github.com/dneumann42/nest#head"
 requires "https://github.com/dneumann42/owl#head"
 
 task shaders, "Build GLSL shaders":
-  mkDir "build/shaders"
-  exec "glslc -fshader-stage=vert shaders/triangle.vert -o build/shaders/triangle.vert.spv"
-  exec "glslc -fshader-stage=frag shaders/triangle.frag -o build/shaders/triangle.frag.spv"
-  exec "glslc -fshader-stage=vert shaders/water.vert -o build/shaders/water.vert.spv"
-  exec "glslc -fshader-stage=frag shaders/water.frag -o build/shaders/water.frag.spv"
-  exec "glslc -fshader-stage=vert shaders/sky.vert -o build/shaders/sky.vert.spv"
-  exec "glslc -fshader-stage=frag shaders/sky.frag -o build/shaders/sky.frag.spv"
-  exec "glslc -fshader-stage=vert shaders/fullscreen.vert -o build/shaders/fullscreen.vert.spv"
-  exec "glslc -fshader-stage=frag shaders/ssao.frag -o build/shaders/ssao.frag.spv"
-  exec "glslc -fshader-stage=frag shaders/composite.frag -o build/shaders/composite.frag.spv"
-  exec "glslc -fshader-stage=frag shaders/depthPreview.frag -o build/shaders/depthPreview.frag.spv"
-  exec "glslc -fshader-stage=frag shaders/depth.frag -o build/shaders/depth.frag.spv"
+  exec "bash scripts/build-shaders.sh spirv"

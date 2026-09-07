@@ -1,4 +1,4 @@
-import std/[os, strformat, tables]
+import std/[os, strformat, strutils, tables]
 
 import sdl3, vmath
 
@@ -383,19 +383,36 @@ proc createShader(
     uniformBuffers = 1'u32,
     samplers = 0'u32,
 ): GPUShader =
-  let code = loadShaderCode(name)
+  let
+    stem = if name.endsWith(".spv"): name[0 ..< name.len - 4] else: name
+    availableFormats = getGPUShaderFormats(device)
+  var
+    shaderName: string
+    shaderFormat: GPUShaderFormat
+  if (availableFormats and GPU_SHADERFORMAT_DXIL.GPUShaderFormat) != 0:
+    shaderName = stem & ".dxil"
+    shaderFormat = GPU_SHADERFORMAT_DXIL.GPUShaderFormat
+  elif (availableFormats and GPU_SHADERFORMAT_SPIRV.GPUShaderFormat) != 0:
+    shaderName = stem & ".spv"
+    shaderFormat = GPU_SHADERFORMAT_SPIRV.GPUShaderFormat
+  else:
+    raiseGpuError(
+      &"No packaged shader format supports GPU formats {availableFormats}"
+    )
+
+  let code = loadShaderCode(shaderName)
   var info = GPUShaderCreateInfo(
     code_size: code.len.csize_t,
     code: cast[ptr UncheckedArray[uint8]](unsafeAddr code[0]),
     entrypoint: cstring"main",
-    format: GPU_SHADERFORMAT_SPIRV.GPUShaderFormat,
+    format: shaderFormat,
     stage: stage,
     num_samplers: samplers,
     num_uniform_buffers: uniformBuffers,
   )
   result = createGPUShader(device, addr info)
   if result.isNil:
-    raiseGpuError("Failed to create GPU shader")
+    raiseGpuError("Failed to create GPU shader " & shaderName)
 
 proc forwardPerspective(fovy, aspect, near, far: float32): Mat4 =
   let
