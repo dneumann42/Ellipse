@@ -5,9 +5,10 @@ import std/os
 
 import sdl3
 import ../resources
+import ../sdlLibraries
 
 proc imgSavePng(surface: ptr Surface, file: cstring): bool {.
-  importc: "IMG_SavePNG", cdecl, dynlib: "libSDL3_image.so"
+  importc: "IMG_SavePNG", cdecl, dynlib: SdlImageLibName
 .}
 
 proc dumpRendererScreenshot*(renderer: Renderer,

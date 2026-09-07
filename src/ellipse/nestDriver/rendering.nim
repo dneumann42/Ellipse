@@ -8,6 +8,7 @@ import nest/[coords, input, screen]
 import nest/fallbackfonts
 import ../aseprite
 import ../rendering/canvas
+import ../sdlLibraries
 import state, fileDialogs
 
 const
@@ -20,7 +21,7 @@ const
   ]
 
 proc imgLoad(file: cstring): ptr Surface {.
-  importc: "IMG_Load", cdecl, dynlib: "libSDL3_image.so"
+  importc: "IMG_Load", cdecl, dynlib: SdlImageLibName
 .}
 converter toChromaColor*(color: screen.Color): chromaColors.ColorRGBA =
   chromaColors.rgba(color.r, color.g, color.b, color.a)

@@ -5,6 +5,7 @@ import sdl3_ttf
 
 import aseprite
 import errors
+import sdlLibraries
 
 type
   ResourceId* = distinct string
@@ -92,7 +93,7 @@ proc loadWAVIO(
 ): bool {.importc: "SDL_LoadWAV_IO", cdecl, dynlib: sdl3.LibName.}
 
 proc imgLoad(file: cstring): ptr Surface {.
-  importc: "IMG_Load", cdecl, dynlib: "libSDL3_image.so"
+  importc: "IMG_Load", cdecl, dynlib: SdlImageLibName
 .}
 
 proc `$`*(id: ResourceId): string {.borrow.}
