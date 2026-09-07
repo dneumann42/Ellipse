@@ -6,6 +6,8 @@ description = "A game engine"
 license = "Proprietary"
 srcDir = "src"
 bin = @["ellipse"]
+installExt = @["nim"]
+installDirs = @["shaders"]
 
 # Dependencies
 
